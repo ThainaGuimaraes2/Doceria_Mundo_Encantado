@@ -8,16 +8,52 @@
 <body>
     <form action="Total.php" method="post">
        <h1>Cardapio</h1>
-       <label for="">Opções</label>
+       <label for="">Opções:</label>
           <br>
         <select name="opcoes" >
             <option value="15">Biscoito de Peixe</option>
-            <option value="20">Bolo</option>
+            <option value="20">Tortinha de frutas</option>
             <option value="18">Maça do Amor</option>
+            <option value="17">Donuts decorado</option>]
+            <option value="18">Cupcake temático</option>
+            <option value="16">Cookie decorados</option>
+            <option value="19">Brownie decorado</option>
         </select>
+        
+         <br> <br>
+         <label for="">Quantidade:</label>
          <br>
-        <input type="number" name="quantidade" placeholder="Quantidade:">
+        <input type="number" name="quantidade" placeholder="Indique a quantidade">
+        <br> <br>
+
+        <label for="">Formas de Pagamento:</label>
         <br>
+         <select name="opcoesPag" >
+            <option value="1">Pix/Dinheiro</option>
+            <option value="2">Débito</option>
+            <option value="3">Crédito</option>
+            <option value="4">Links de pagamento</option>
+        </select>
+        <br> <br>
+
+        <label for="">Parcelas</label>
+        <br>
+         <select name="parcelas" >
+         <?php 
+         for($i=1;$i<13;$i++){
+            ?>
+           <option value="<?php echo $i?>"> <?php echo $i ?></option>
+        
+           <?php
+         }   
+         ?>
+            
+        </select>
+        <br> <br>
+      
+        
+
+
         <input type="submit" value="Enviar">
          <input type="reset" value="limpar">
     </form>
