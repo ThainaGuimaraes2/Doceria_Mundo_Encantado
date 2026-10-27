@@ -10,28 +10,28 @@
         <label for="">Nome:</label>
         <input type="text" name="" id="">
          <BR>
-        <label for="">Email</label>
+        <label for="">Email:</label>
         <input type="email" name="" id="">
           <BR>
-        <label for="">Senha</label>
+        <label for="">Senha:</label>
         <input type="password" name="" id="">
          <BR>
-        <label for="">Confirme a senha</label>
+        <label for="">Confirme a senha:</label>
         <input type="password" name="" id="">
            <BR>
-        <label for="">Telefone</label>
+        <label for="">Telefone:</label>
         <input type="text" name="" id="">
           <BR>
-        <label for="">Endereço</label>
+        <label for="">Endereço:</label>
         <input type="text" name="" id="">
            <BR>
-        <label for="">Cep</label>
+        <label for="">CEP:</label>
         <input type="number" name="" id="">
             <BR>
-        <label for="">Complemento</label>
+        <label for="">Complemento:</label>
         <input type="text" name="" id="">
                 <BR>
-        <label for="">Numero</label>
+        <label for="">Número:</label>
         <input type="number" name="" id="">
           <BR>
             <input type="submit" value="Cadastrar">

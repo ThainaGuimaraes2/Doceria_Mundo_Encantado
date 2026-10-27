@@ -1,6 +1,6 @@
 <?php
-   require_once "cal.php";
-   require_once "juros.php";
+   require_once "../classes/cal.php";
+   require_once "../classes/juros.php";
 
 
    $opcoes = $_POST['opcoes'] ;
