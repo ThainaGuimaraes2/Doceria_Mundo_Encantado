@@ -3,7 +3,7 @@
    $opcoes = $_POST['opcoes'];
    $quantidade = $_POST['quantidade'];
    $resultado;
-   $resulBruto
+   $resulBruto;
    $parcelas = $_POST['parcelas'];
    $opcoesPag = $_POST['opcoesPag'];
    
@@ -13,32 +13,28 @@
            echo "O total da sua compra : $resultado";
          break;
       case '2':
-         # code...
+          $resultado = $opcoes * $quantidade;
+          echo "O total da sua compra : $resultado";
+         break;
+      case '3':
+        echo "<br><br>"
+        echo "<label for="">Parcelas</label>"
+        echo"<br>"
+        echo "<select name='parcelas' >
+         <?php 
+         for($i=1;$i<13;$i++){
+            ?>
+           <option value="<?php echo $i?>"> "<?php echo $i ?>"</option>
+        
+           <?php
+         }   
+         ?>
+            
+        </select>"
+        echo "<br> <br>"
          break;
     }
 
-
-
-
-
-
-
-   if($opcoesPag == 1){
-       
-   } elseif($opcoesPag == 2 ){
-        $resultado = $opcoes * $quantidade;
-        echo "O total da sua compra : $resultado";
-   }elseif($opcoesPag == 3 ){
-        if($parcelas <= 2){
-           $resulBruto = $opcoes * $quantidade * 0,0579;
-           $resultado = $resulBruto + $opcoes*$quantidade;
-           echo "O total da sua compra : $resultado";
-        }else{
-            $resulBruto = $opcoes * $quantidade * 0,1238;
-           $resultado = $resulBruto + $opcoes*$quantidade;
-           echo "O total da sua compra : $resultado";
-        }
-   }  
 
 
 
