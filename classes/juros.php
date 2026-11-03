@@ -2,7 +2,7 @@
 
 class Juros{
     function calcular($opcoes,$parcelas,$quantidade){
-        $total= (float)$opcoes * (int)$quantidade;
+        $total= $opcoes * $quantidade;
       
             if($parcelas <= 2){
                  $taxa = 5.79 /100;
