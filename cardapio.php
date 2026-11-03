@@ -1,5 +1,6 @@
 <?php
 include "./classes/cabecalho.php" 
+include './classes/NavBar.php';
 ?>
     <form action="Total.php" method="post">
        <h1>Cardápio</h1>

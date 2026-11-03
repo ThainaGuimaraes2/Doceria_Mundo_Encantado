@@ -1,5 +1,6 @@
 <?php
 include "./classes/cabecalho.php" 
+include './classes/NavBar.php';
 ?>
     <form action="" method="post">
         <label for="">Nome:</label>

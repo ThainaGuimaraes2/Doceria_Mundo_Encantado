@@ -1,5 +1,6 @@
 <?php
 include './classes/cabecalho.php';
+include './classes/NavBar.php';
 ?>
     <form action="formulario.php" method="post">
         <label>Email</label>

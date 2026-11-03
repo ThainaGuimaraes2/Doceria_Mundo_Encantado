@@ -1,27 +1,16 @@
 <?php
 include 'cabecalho.php';
 ?>
-<nav class="navbar sm:navbar-expand bg-1 fg-2">
+  <nav class="navbar md:navbar-expand bg-1">
   <div class="container-fluid">
-    <a class="navbar-brand" href="#">Navbar</a>
-    <button class="btn-icon navbar-toggler" type="button" data-bs-toggle="drawer" data-bs-target="#navbarNavAltMarkup" aria-controls="navbarNavAltMarkup" aria-expanded="false" aria-label="Toggle navigation">
-      <span class="navbar-toggler-icon" aria-hidden="true"></span>
-    </button>
-    <dialog class="drawer drawer-end" tabindex="-1" id="navbarNavAltMarkup" aria-labelledby="navbarNavAltMarkupLabel">
+     <a class="navbar-brand" href="#">Doceria Mundo Encantado</a>
       <div class="drawer-header">
-        <h5 class="drawer-title" id="navbarNavAltMarkupLabel">Menu</h5>
-        <button type="button" class="btn-close" data-bs-dismiss="drawer" aria-label="Close"></button>
-      </div>
-      <div class="drawer-body">
-        <div class="nav nav-pills navbar-nav">
-          <a class="nav-link active" aria-current="page" href="#">Home</a>
-          <a class="nav-link" href="#">Features</a>
-          <a class="nav-link" href="#">Pricing</a>
-          <a class="nav-link disabled" aria-disabled="true">Disabled</a>
-        </div>
-      </div>
-    </dialog>
-  </div>
+        <ul class="nav navbar-nav me-auto">
+        <li><a href="/Doceria_Mundo_Encantado/index.php">Home</a></li>
+        <li><a href="/Doceria_Mundo_Encantado/cardapio.php">cardapio</a></li>
+        <li><a href="/Doceria_Mundo_Encantado/cadastro.php">Cadastro</a></li>
+          <li><a href="/Doceria_Mundo_Encantado/login.php">Login</a></li>
+        </ul>
 </nav>
 <?php
 include 'rodape.php';
