@@ -1,12 +1,6 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Document</title>
-</head>
-<body>
-
+<?php
+include './classes/rodape.php';
+?>
     <form action="formulario.php" method="post">
         <label>Email</label>
         <input type="Email" placeholder="Digite um email" require>
@@ -20,7 +14,6 @@
 
     </form>
     
-    
-
-</body>
-</html>
+<?php
+include './classes/rodape.php';
+?>
