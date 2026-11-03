@@ -1,5 +1,5 @@
 <?php
-include './classes/rodape.php';
+include './classes/cabecalho.php';
 ?>
     <form action="formulario.php" method="post">
         <label>Email</label>
