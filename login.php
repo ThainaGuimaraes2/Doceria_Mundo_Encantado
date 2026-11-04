@@ -1,20 +1,25 @@
+
 <?php
 include './classes/cabecalho.php';
 include './classes/NavBar.php';
 ?>
-    <form action="formulario.php" method="post">
-        <label>Email</label>
-        <input type="Email" placeholder="Digite um email" require>
-        <br>
-        <label for="Senha">Senha</label>
-        <input type="password" placeholder="Digite uma senha" required>
-        <br>
-        <input type="submit" value="Entrar">
 
+<form action="formulario.php" method="post">
 
+    <label for="email">Email</label>
+    <input type="email"  name="email" id="email" placeholder="Digite um email" required>
+    <br>
 
-    </form>
-    
+    <label for="senha">Senha</label>
+    <input  type="password"  name="senha" id="senha" placeholder="Digite uma senha" required >
+
+    <br>
+
+    <input type="submit" value="Entrar">
+
+</form>
+
 <?php
 include './classes/rodape.php';
 ?>
+
