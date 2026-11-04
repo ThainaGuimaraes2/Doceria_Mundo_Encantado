@@ -16,5 +16,3 @@ catch(Exception $e){
 while ($funcionarios = $stmt->fetch(PDO::FETCH_ASSOC)) {
     echo $funcionarios['nome'] . " - " . $funcionarios['email'] . "<br>";
 }*/
-
-exit;
