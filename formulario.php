@@ -15,7 +15,7 @@ if (empty($email) || empty($senha)) {
 try {
 
     // Buscar cliente pelo email
-    $sql = "SELECT * FROM clientes WHERE email = :email";
+    $sql = "SELECT * FROM clientes WHERE Email = :email";
 
     $stmt = $pdo->prepare($sql);
     $stmt->execute([
@@ -28,10 +28,10 @@ try {
     if ($cliente) {
 
         // Validar senha
-        if (password_verify($senha, $cliente['senha'])) {
+        if (password_verify($senha, $cliente['Senha'])) {
 
             echo "Login realizado com sucesso! Bem-vindo, "
-                 . htmlspecialchars($cliente['nome']);
+                 . htmlspecialchars($cliente['Nome']);
 
         } else {
             echo "Senha incorreta!";
@@ -42,5 +42,5 @@ try {
     }
 
 } catch (PDOException $e) {
-    echo "Erro ao realizar login.";
+    echo "Erro ao realizar login: " . $e->getMessage();
 }
