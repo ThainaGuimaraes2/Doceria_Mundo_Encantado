@@ -6,7 +6,7 @@ include 'cabecalho.php';
      <a class="navbar-brand" href="#">Doceria Mundo Encantado</a>
       <div class="drawer-header">
         <ul class="nav navbar-nav me-auto">
-        <li><a href="/Doceria_Mundo_Encantado/cardapio.php">Cardapio</a></li>
+        <li><a href="/Doceria_Mundo_Encantado/cardapio.php">Home</a></li>
         <li><a href="/Doceria_Mundo_Encantado/cadastro.php">Cadastro</a></li>
           <li><a href="/Doceria_Mundo_Encantado/login.php">Login</a></li>
         </ul>
