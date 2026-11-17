@@ -21,6 +21,53 @@ function protegerCardapio($valor) {
     return htmlspecialchars((string)$valor, ENT_QUOTES, 'UTF-8');
 }
 
+// O próprio cardápio recebe o pedido e calcula o total.
+$pedidoCalculado = false;
+$erroPedido = '';
+$resultado = null;
+$valorJuros = null;
+$saidaCalculo = '';
+$opcoesPag = '';
+$opcoesSelecionada = isset($_POST['opcoes']) ? (string)$_POST['opcoes'] : '';
+$quantidade = 1;
+$parcelas = 1;
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $opcoes = filter_input(INPUT_POST, 'opcoes', FILTER_VALIDATE_FLOAT);
+    $quantidade = filter_input(INPUT_POST, 'quantidade', FILTER_VALIDATE_INT);
+    $parcelas = filter_input(INPUT_POST, 'parcelas', FILTER_VALIDATE_INT);
+    $opcoesPag = (string)($_POST['opcoesPag'] ?? '');
+
+    if ($opcoes === false || $opcoes === null || $opcoes < 0 ||
+        $quantidade === false || $quantidade === null || $quantidade < 1 ||
+        $parcelas === false || $parcelas === null || $parcelas < 1 || $parcelas > 12 ||
+        !in_array($opcoesPag, ['1', '2', '3', '4'], true)) {
+        $erroPedido = 'Confira o produto, a quantidade e a forma de pagamento.';
+    } else {
+        require_once './classes/Soma.php';
+        require_once './classes/Juros.php';
+
+        $calculo = new Soma();
+        $juros = new Juros();
+
+        // Algumas versões das classes exibem o resultado com echo.
+        // Capturamos essa saída para ela aparecer no resumo, e não no topo da página.
+        ob_start();
+        switch ($opcoesPag) {
+            case '1': // Pix / Dinheiro
+            case '2': // Débito
+            case '4': // Link de pagamento
+                $resultado = $calculo->calcular($opcoes, $quantidade);
+                break;
+            case '3': // Crédito
+                $valorJuros = $juros->calcular($opcoes, $parcelas, $quantidade);
+                break;
+        }
+        $saidaCalculo = trim(ob_get_clean());
+        $pedidoCalculado = true;
+    }
+}
+
 include "./classes/cabecalho.php";
 include "./classes/NavBar.php";
 ?>
@@ -30,7 +77,9 @@ include "./classes/NavBar.php";
     --rosa-fundo: #f7e1e7; --rosa-claro: #fbeef1; --marrom: #76545a;
     --marrom-escuro: #62434a; --branco: #fffdfc; --borda: #ead3d8;
 }
-.cardapio-pagina { min-height:100vh; padding:35px 16px 55px; background:var(--rosa-fundo); color:var(--marrom); font-family:Georgia,'Times New Roman',serif; }
+body { margin:0; background:var(--rosa-fundo); color:var(--marrom); font-family:Georgia,'Times New Roman',serif; }
+.cardapio-pagina { min-height:100vh; padding:35px 16px 55px; background:var(--rosa-fundo); color:var(--marrom); font-family:Georgia,'Times New Roman',serif; box-sizing:border-box; }
+.cardapio-pagina *, .cardapio-pagina *::before, .cardapio-pagina *::after { box-sizing:border-box; }
 .cardapio-container { width:min(94%,900px); margin:0 auto; }
 .cardapio-topo { text-align:center; margin-bottom:30px; }
 .cardapio-titulo { margin:0 0 8px; color:var(--marrom-escuro); font-size:clamp(28px,4vw,38px); font-weight:normal; }
@@ -56,6 +105,7 @@ include "./classes/NavBar.php";
 .cardapio-botoes button,.cardapio-botoes input { width:auto; margin:0; padding:12px 21px; border:1px solid var(--marrom); border-radius:8px; cursor:pointer; background:var(--marrom); color:#fffaf8; font:bold 14px Georgia,'Times New Roman',serif; }
 .cardapio-botoes input[type="reset"] { background:#fff; color:var(--marrom); }
 .cardapio-aviso { padding:18px; margin-bottom:24px; background:var(--branco); border:1px solid var(--borda); border-radius:10px; text-align:center; }
+.resultado-calculo { margin-top:16px; padding:16px; border-radius:9px; background:var(--rosa-claro); color:var(--marrom-escuro); line-height:1.8; }
 @media(max-width:560px) {
     .cardapio-container { width:100%; }
     .produto-card { gap:12px; min-height:112px; padding:9px; }
@@ -92,12 +142,12 @@ include "./classes/NavBar.php";
                             <p class="produto-preco">R$ <?= number_format((float)$produto['preco'], 2, ',', '.') ?></p>
                         </div>
 
-                        <button class="produto-escolher" type="button" data-indice="<?= (int)$indice ?>">Adicionar</button>
+                        <button class="produto-escolher <?= ($opcoesSelecionada !== '' && $opcoesSelecionada === (string)$produto['preco']) ? 'selecionado' : '' ?>" type="button" data-preco="<?= protegerCardapio($produto['preco']) ?>"><?= ($opcoesSelecionada !== '' && $opcoesSelecionada === (string)$produto['preco']) ? 'Adicionado' : 'Adicionar' ?></button>
                     </article>
                 <?php endforeach; ?>
             </section>
 
-            <form class="cardapio-formulario" id="formPedido" action="Total.php" method="post">
+            <form class="cardapio-formulario" id="formPedido" action="" method="post">
                 <h2>Finalize seu pedido</h2>
                 <p class="cardapio-instrucao">Selecione os detalhes do seu pedido abaixo.</p>
 
@@ -105,7 +155,7 @@ include "./classes/NavBar.php";
                 <select name="opcoes" id="opcoes" required>
                     <option value="">Selecione um produto</option>
                     <?php foreach ($produtos as $produto): ?>
-                        <option value="<?= protegerCardapio($produto['preco']) ?>">
+                        <option value="<?= protegerCardapio($produto['preco']) ?>" <?= ($opcoesSelecionada !== '' && $opcoesSelecionada === (string)$produto['preco']) ? 'selected' : '' ?>>
                             <?= protegerCardapio($produto['nome']) ?> — R$ <?= number_format((float)$produto['preco'], 2, ',', '.') ?>
                         </option>
                     <?php endforeach; ?>
@@ -130,10 +180,36 @@ include "./classes/NavBar.php";
                 </select>
 
                 <div class="cardapio-botoes">
-                    <button type="submit">Enviar pedido</button>
+                    <button type="submit">Calcular total</button>
                     <input type="reset" value="Limpar">
                 </div>
             </form>
+
+            <?php if ($erroPedido !== ''): ?>
+                <div class="cardapio-aviso" role="alert"><?= protegerCardapio($erroPedido) ?></div>
+            <?php endif; ?>
+
+            <?php if ($pedidoCalculado): ?>
+                <section class="cardapio-formulario" style="margin-top:20px;" aria-live="polite">
+                    <h2>Resumo do pedido</h2>
+                    <p>Quantidade: <strong><?= (int)$quantidade ?></strong></p>
+                    <p>Forma de pagamento:
+                        <strong><?= ['1' => 'Pix / Dinheiro', '2' => 'Débito', '3' => 'Crédito', '4' => 'Link de pagamento'][$opcoesPag] ?></strong>
+                    </p>
+                    <?php if ($opcoesPag === '3'): ?>
+                        <p>Parcelas: <strong><?= (int)$parcelas ?>x</strong></p>
+                    <?php endif; ?>
+                    <?php if ($saidaCalculo !== ''): ?>
+                        <div class="resultado-calculo"><?= $saidaCalculo ?></div>
+                    <?php elseif ($opcoesPag === '3' && is_numeric($valorJuros)): ?>
+                        <p class="produto-preco">Total com juros: R$ <?= number_format((float)$valorJuros, 2, ',', '.') ?></p>
+                    <?php elseif (is_numeric($resultado)): ?>
+                        <p class="produto-preco">Total: R$ <?= number_format((float)$resultado, 2, ',', '.') ?></p>
+                    <?php else: ?>
+                        <p>O cálculo foi realizado, mas a classe não retornou um valor para exibição.</p>
+                    <?php endif; ?>
+                </section>
+            <?php endif; ?>
         <?php endif; ?>
     </div>
 </main>
@@ -141,12 +217,12 @@ include "./classes/NavBar.php";
 <script>
 document.querySelectorAll('.produto-escolher').forEach(function(botao) {
     botao.addEventListener('click', function() {
-        const indice = Number(this.dataset.indice);
+        const preco = this.dataset.preco;
         const seletor = document.getElementById('opcoes');
         if (!seletor) return;
 
-        // A primeira opção do select é apenas a instrução; os produtos começam no índice 1.
-        seletor.selectedIndex = indice + 1;
+        // Seleciona pelo valor do produto, sem depender da posição na lista.
+        seletor.value = preco;
 
         document.querySelectorAll('.produto-escolher').forEach(function(item) {
             item.classList.remove('selecionado');
