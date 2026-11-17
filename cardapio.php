@@ -11,7 +11,7 @@ include "./classes/NavBar.php";
             <option value="15">Biscoito de Peixe: R$15,00</option>
             <option value="20">Tortinha de frutas: R$20,00</option>
             <option value="18">Maça do Amor: R$18,00</option>
-            <option value="17">Donuts decorado: R$17,00</option>]
+            <option value="17">Donuts decorado: R$17,00</option>
             <option value="18">Cupcake temático: R$18,00</option>
             <option value="16">Cookie decorados: R$16,00</option>
             <option value="19">Brownie decorado: R$19,00</option>
