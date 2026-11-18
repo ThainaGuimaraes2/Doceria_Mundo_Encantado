@@ -1,239 +1,235 @@
 <?php
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
-
+session_start();
 require_once "./config/database.php";
 
-if (!isset($pdo)) {
-    die("Erro: conexão com o banco não encontrada.");
-}
-
-// Busca os produtos cadastrados no painel do gestor.
-$stmt = $pdo->query(
-    "SELECT id_produto, nome, preco, imagem_url
-     FROM produto
-     ORDER BY nome ASC"
-);
-$produtos = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-function protegerCardapio($valor) {
+function h($valor) {
     return htmlspecialchars((string)$valor, ENT_QUOTES, 'UTF-8');
 }
 
-// O próprio cardápio recebe o pedido e calcula o total.
-$pedidoCalculado = false;
-$erroPedido = '';
-$resultado = null;
-$valorJuros = null;
-$saidaCalculo = '';
-$opcoesPag = '';
-$opcoesSelecionada = isset($_POST['opcoes']) ? (string)$_POST['opcoes'] : '';
-$quantidade = 1;
-$parcelas = 1;
+// O cardápio pode ser visualizado por qualquer pessoa.
+$stmt = $pdo->query("SELECT id_produto, nome, preco, imagem_url FROM produto ORDER BY nome ASC");
+$produtos = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $opcoes = filter_input(INPUT_POST, 'opcoes', FILTER_VALIDATE_FLOAT);
-    $quantidade = filter_input(INPUT_POST, 'quantidade', FILTER_VALIDATE_INT);
-    $parcelas = filter_input(INPUT_POST, 'parcelas', FILTER_VALIDATE_INT);
-    $opcoesPag = (string)($_POST['opcoesPag'] ?? '');
+$erro = '';
+$pedidoCriado = false;
 
-    if ($opcoes === false || $opcoes === null || $opcoes < 0 ||
-        $quantidade === false || $quantidade === null || $quantidade < 1 ||
-        $parcelas === false || $parcelas === null || $parcelas < 1 || $parcelas > 12 ||
-        !in_array($opcoesPag, ['1', '2', '3', '4'], true)) {
-        $erroPedido = 'Confira o produto, a quantidade e a forma de pagamento.';
-    } else {
-        require_once './classes/Soma.php';
-        require_once './classes/Juros.php';
-
-        $calculo = new Soma();
-        $juros = new Juros();
-
-        // Algumas versões das classes exibem o resultado com echo.
-        // Capturamos essa saída para ela aparecer no resumo, e não no topo da página.
-        ob_start();
-        switch ($opcoesPag) {
-            case '1': // Pix / Dinheiro
-            case '2': // Débito
-            case '4': // Link de pagamento
-                $resultado = $calculo->calcular($opcoes, $quantidade);
-                break;
-            case '3': // Crédito
-                $valorJuros = $juros->calcular($opcoes, $parcelas, $quantidade);
-                break;
-        }
-        $saidaCalculo = trim(ob_get_clean());
-        $pedidoCalculado = true;
+// A compra só é concluída por um cliente autenticado.
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['finalizar_pedido'])) {
+    if (
+        !isset($_SESSION['tipo'], $_SESSION['id']) ||
+        $_SESSION['tipo'] !== 'cliente'
+    ) {
+        $_SESSION['mensagem_login'] = 'Entre na sua conta ou cadastre-se para finalizar seu pedido.';
+        header("Location: login.php");
+        exit;
     }
+
+    if (
+        !isset($_POST['token']) ||
+        !hash_equals($_SESSION['token_pedido'] ?? '', (string)$_POST['token'])
+    ) {
+        $erro = 'Sua sessão expirou. Atualize a página e tente novamente.';
+    } else {
+        $idProduto = filter_input(INPUT_POST, 'id_produto', FILTER_VALIDATE_INT);
+        $quantidade = filter_input(INPUT_POST, 'quantidade', FILTER_VALIDATE_INT);
+        $forma = (string)($_POST['forma_pagamento'] ?? '');
+        $parcelas = filter_input(INPUT_POST, 'parcelas', FILTER_VALIDATE_INT);
+
+        $formas = [
+            '1' => 'Pix / Dinheiro',
+            '2' => 'Débito',
+            '3' => 'Crédito',
+            '4' => 'Link de pagamento'
+        ];
+
+        if (
+            !$idProduto || !$quantidade || $quantidade < 1 || $quantidade > 99 ||
+            !isset($formas[$forma]) ||
+            !$parcelas || $parcelas < 1 || $parcelas > 12
+        ) {
+            $erro = 'Confira o produto, a quantidade e a forma de pagamento.';
+        } else {
+            // O preço é consultado no banco. Não confiamos no preço enviado pelo navegador.
+            $consulta = $pdo->prepare(
+                "SELECT id_produto, nome, preco FROM produto WHERE id_produto = :id"
+            );
+            $consulta->execute([':id' => $idProduto]);
+            $produto = $consulta->fetch(PDO::FETCH_ASSOC);
+
+            if (!$produto) {
+                $erro = 'O produto selecionado não foi encontrado.';
+            } else {
+                $valorUnitario = (float)$produto['preco'];
+                $valorTotal = $valorUnitario * $quantidade;
+
+                // Mantém o cálculo de juros da classe já usada no projeto, quando disponível.
+                if ($forma === '3' && file_exists('./classes/Juros.php')) {
+                    require_once './classes/Juros.php';
+                    $juros = new Juros();
+                    ob_start();
+                    $retornoJuros = $juros->calcular($valorUnitario, $parcelas, $quantidade);
+                    $saidaJuros = trim(ob_get_clean());
+
+                    if (is_numeric($retornoJuros)) {
+                        $valorTotal = (float)$retornoJuros;
+                    } elseif ($saidaJuros !== '') {
+                        $texto = strip_tags($saidaJuros);
+                        if (preg_match_all('/(?:R\\$\\s*)?([0-9.]+,[0-9]{2}|[0-9]+\\.[0-9]{2})/', $texto, $achados) && !empty($achados[1])) {
+                            $ultimo = end($achados[1]);
+                            $valorTotal = (float)str_replace(',', '.', str_replace('.', '', $ultimo));
+                        }
+                    }
+                }
+
+                try {
+                    $pdo->beginTransaction();
+
+                    // O pedido fica associado ao cliente e ao produto.
+                    $insertPedido = $pdo->prepare(
+                        "INSERT INTO PEDIDOS
+                         (id_clientes, id_produto, data, valor_total, status, quantidade_produto)
+                         VALUES
+                         (:cliente, :produto, CURDATE(), :total, 'Pendente', :quantidade)"
+                    );
+                    $insertPedido->execute([
+                        ':cliente' => $_SESSION['id'],
+                        ':produto' => $produto['id_produto'],
+                        ':total' => number_format($valorTotal, 2, '.', ''),
+                        ':quantidade' => (string)$quantidade
+                    ]);
+
+                    $idPedido = (int)$pdo->lastInsertId();
+                    $codigoPagamento = random_int(100000, 999999);
+
+                    $insertPagamento = $pdo->prepare(
+                        "INSERT INTO pagamento
+                         (id_pedidos, forma_de_pagamento, data, codigo_pagamento)
+                         VALUES
+                         (:pedido, :forma, CURDATE(), :codigo)"
+                    );
+                    $insertPagamento->execute([
+                        ':pedido' => $idPedido,
+                        ':forma' => $formas[$forma] . ($forma === '3' ? " - {$parcelas}x" : ''),
+                        ':codigo' => $codigoPagamento
+                    ]);
+
+                    $pdo->commit();
+
+                    header("Location: meus_pedidos.php?sucesso=1");
+                    exit;
+                } catch (Throwable $e) {
+                    if ($pdo->inTransaction()) {
+                        $pdo->rollBack();
+                    }
+                    error_log($e->getMessage());
+                    $erro = 'Não foi possível registrar seu pedido. Tente novamente.';
+                }
+            }
+        }
+    }
+}
+
+if (empty($_SESSION['token_pedido'])) {
+    $_SESSION['token_pedido'] = bin2hex(random_bytes(32));
 }
 
 include "./classes/cabecalho.php";
 include "./classes/NavBar.php";
 ?>
-
 <style>
-:root {
-    --rosa-fundo: #f7e1e7; --rosa-claro: #fbeef1; --marrom: #76545a;
-    --marrom-escuro: #62434a; --branco: #fffdfc; --borda: #ead3d8;
-}
-body { margin:0; background:var(--rosa-fundo); color:var(--marrom); font-family:Georgia,'Times New Roman',serif; }
-.cardapio-pagina { min-height:100vh; padding:35px 16px 55px; background:var(--rosa-fundo); color:var(--marrom); font-family:Georgia,'Times New Roman',serif; box-sizing:border-box; }
-.cardapio-pagina *, .cardapio-pagina *::before, .cardapio-pagina *::after { box-sizing:border-box; }
-.cardapio-container { width:min(94%,900px); margin:0 auto; }
-.cardapio-topo { text-align:center; margin-bottom:30px; }
-.cardapio-titulo { margin:0 0 8px; color:var(--marrom-escuro); font-size:clamp(28px,4vw,38px); font-weight:normal; }
-.cardapio-subtitulo { margin:0; color:#98777d; }
-.cardapio-secao-titulo { margin:28px 0 14px; color:var(--marrom-escuro); font-size:22px; font-weight:normal; }
-.produtos-lista { display:grid; grid-template-columns:1fr; gap:14px; margin-bottom:32px; }
-.produto-card { display:flex; align-items:center; gap:18px; min-height:142px; padding:12px; background:var(--branco); border:1px solid var(--borda); border-radius:12px; box-shadow:0 3px 12px rgba(118,84,90,.07); transition:transform .2s,box-shadow .2s; }
-.produto-card:hover { transform:translateY(-2px); box-shadow:0 6px 16px rgba(118,84,90,.12); }
-.produto-card img,.produto-sem-imagem { flex:0 0 125px; width:125px; height:116px; object-fit:cover; border-radius:9px; background:var(--rosa-claro); }
-.produto-sem-imagem { display:grid; place-items:center; color:#ad8991; font-size:13px; }
-.produto-info { flex:1; min-width:0; }
-.produto-info h3 { margin:0 0 9px; color:var(--marrom-escuro); font-size:19px; font-weight:normal; }
-.produto-preco { margin:0; color:var(--marrom); font-size:18px; font-weight:bold; }
-.produto-escolher { flex:0 0 auto; padding:10px 17px; border:1px solid var(--marrom); border-radius:8px; background:#fff; color:var(--marrom); font:bold 14px Georgia,'Times New Roman',serif; cursor:pointer; transition:.2s; }
-.produto-escolher:hover,.produto-escolher.selecionado { background:var(--marrom); color:white; }
-.cardapio-formulario { max-width:700px; margin:0 auto; padding:28px; background:var(--branco); border:1px solid var(--borda); border-radius:12px; box-shadow:0 3px 12px rgba(118,84,90,.06); }
-.cardapio-formulario h2 { margin:0 0 8px; color:var(--marrom-escuro); font-size:23px; font-weight:normal; }
-.cardapio-instrucao { margin:0 0 20px; color:#98777d; font-size:14px; }
-.cardapio-formulario label { display:block; margin:14px 0 7px; color:var(--marrom-escuro); }
-.cardapio-formulario input,.cardapio-formulario select { display:block; width:100%; padding:13px 14px; margin-bottom:14px; border:1px solid #dfcdd1; border-radius:8px; background:#fff; color:var(--marrom-escuro); font:14px Georgia,'Times New Roman',serif; box-sizing:border-box; }
-.cardapio-formulario input:focus,.cardapio-formulario select:focus { outline:none; border-color:#c58b9a; box-shadow:0 0 0 3px rgba(244,201,213,.35); }
-.cardapio-botoes { display:flex; flex-wrap:wrap; gap:10px; margin-top:8px; }
-.cardapio-botoes button,.cardapio-botoes input { width:auto; margin:0; padding:12px 21px; border:1px solid var(--marrom); border-radius:8px; cursor:pointer; background:var(--marrom); color:#fffaf8; font:bold 14px Georgia,'Times New Roman',serif; }
-.cardapio-botoes input[type="reset"] { background:#fff; color:var(--marrom); }
-.cardapio-aviso { padding:18px; margin-bottom:24px; background:var(--branco); border:1px solid var(--borda); border-radius:10px; text-align:center; }
-.resultado-calculo { margin-top:16px; padding:16px; border-radius:9px; background:var(--rosa-claro); color:var(--marrom-escuro); line-height:1.8; }
-@media(max-width:560px) {
-    .cardapio-container { width:100%; }
-    .produto-card { gap:12px; min-height:112px; padding:9px; }
-    .produto-card img,.produto-sem-imagem { flex-basis:92px; width:92px; height:92px; }
-    .produto-info h3 { font-size:16px; }
-    .produto-preco { font-size:16px; }
-    .produto-escolher { padding:9px 11px; font-size:12px; }
-    .cardapio-formulario { padding:21px 16px; }
-}
+:root{--rosa:#f7e1e7;--rosa-claro:#fbeef1;--marrom:#76545a;--escuro:#62434a;--branco:#fffdfc;--borda:#ead3d8}
+body{margin:0;background:var(--rosa);color:var(--marrom);font-family:Georgia,'Times New Roman',serif}
+.pagina{min-height:70vh;padding:35px 16px 55px;background:var(--rosa)}
+.container{width:min(94%,900px);margin:auto}
+.topo{text-align:center;margin-bottom:28px}
+h1{font-size:clamp(28px,4vw,38px);font-weight:normal;color:var(--escuro);margin:0 0 8px}
+.sub{color:#98777d;margin:0}
+h2{font-size:22px;font-weight:normal;color:var(--escuro);margin:25px 0 14px}
+.lista{display:grid;gap:13px}
+.produto{display:flex;align-items:center;gap:17px;background:var(--branco);border:1px solid var(--borda);border-radius:12px;padding:12px}
+.produto img,.sem-imagem{width:112px;height:105px;object-fit:cover;border-radius:8px;background:var(--rosa-claro);flex-shrink:0}
+.sem-imagem{display:grid;place-items:center;font-size:13px;color:#98777d}
+.info{flex:1}.info h3{margin:0 0 8px;color:var(--escuro);font-size:19px;font-weight:normal}
+.preco{font-weight:bold;font-size:18px;margin:0}
+.form,.aviso{max-width:700px;margin:25px auto 0;padding:25px;background:var(--branco);border:1px solid var(--borda);border-radius:12px}
+label{display:block;margin:13px 0 6px;color:var(--escuro)}
+select,input{width:100%;padding:12px;border:1px solid #dfcdd1;border-radius:8px;background:#fff;color:var(--escuro);font:15px Georgia,serif;box-sizing:border-box}
+button{margin-top:18px;padding:12px 22px;border:0;border-radius:8px;background:var(--marrom);color:white;font:bold 15px Georgia,serif;cursor:pointer}
+.aviso{text-align:center}.erro{color:#9b3030}.login-link{color:var(--escuro);font-weight:bold}
+@media(max-width:560px){.produto{gap:11px}.produto img,.sem-imagem{width:82px;height:82px}.info h3{font-size:16px}.form{padding:19px}}
 </style>
 
-<main class="cardapio-pagina">
-    <div class="cardapio-container">
-        <div class="cardapio-topo">
-            <h1 class="cardapio-titulo">Nosso Cardápio</h1>
-            <p class="cardapio-subtitulo">Escolha seus produtos favoritos!</p>
-        </div>
+<main class="pagina">
+<div class="container">
+    <header class="topo">
+        <h1>Nosso Cardápio</h1>
+        <p class="sub">Escolha seus produtos favoritos!</p>
+    </header>
 
-        <?php if (empty($produtos)): ?>
-            <div class="cardapio-aviso">Ainda não há produtos cadastrados. Volte mais tarde!</div>
-        <?php else: ?>
-            <h2 class="cardapio-secao-titulo">Nossos produtos</h2>
-            <section class="produtos-lista" aria-label="Produtos disponíveis">
-                <?php foreach ($produtos as $indice => $produto): ?>
-                    <article class="produto-card">
-                        <?php if (!empty($produto['imagem_url'])): ?>
-                            <img src="<?= protegerCardapio($produto['imagem_url']) ?>" alt="<?= protegerCardapio($produto['nome']) ?>">
-                        <?php else: ?>
-                            <div class="produto-sem-imagem">Sem imagem</div>
-                        <?php endif; ?>
+    <?php if ($erro !== ''): ?>
+        <div class="aviso erro"><?= h($erro) ?></div>
+    <?php endif; ?>
 
-                        <div class="produto-info">
-                            <h3><?= protegerCardapio($produto['nome']) ?></h3>
-                            <p class="produto-preco">R$ <?= number_format((float)$produto['preco'], 2, ',', '.') ?></p>
-                        </div>
-
-                        <button class="produto-escolher <?= ($opcoesSelecionada !== '' && $opcoesSelecionada === (string)$produto['preco']) ? 'selecionado' : '' ?>" type="button" data-preco="<?= protegerCardapio($produto['preco']) ?>"><?= ($opcoesSelecionada !== '' && $opcoesSelecionada === (string)$produto['preco']) ? 'Adicionado' : 'Adicionar' ?></button>
-                    </article>
-                <?php endforeach; ?>
-            </section>
-
-            <form class="cardapio-formulario" id="formPedido" action="" method="post">
-                <h2>Finalize seu pedido</h2>
-                <p class="cardapio-instrucao">Selecione os detalhes do seu pedido abaixo.</p>
-
-                <label for="opcoes">Produto escolhido:</label>
-                <select name="opcoes" id="opcoes" required>
-                    <option value="">Selecione um produto</option>
-                    <?php foreach ($produtos as $produto): ?>
-                        <option value="<?= protegerCardapio($produto['preco']) ?>" <?= ($opcoesSelecionada !== '' && $opcoesSelecionada === (string)$produto['preco']) ? 'selected' : '' ?>>
-                            <?= protegerCardapio($produto['nome']) ?> — R$ <?= number_format((float)$produto['preco'], 2, ',', '.') ?>
-                        </option>
-                    <?php endforeach; ?>
-                </select>
-
-                <label for="quantidade">Quantidade:</label>
-                <input type="number" name="quantidade" id="quantidade" placeholder="Indique a quantidade" min="1" step="1" value="1" required>
-
-                <label for="opcoesPag">Forma de pagamento:</label>
-                <select name="opcoesPag" id="opcoesPag" required>
-                    <option value="1">Pix / Dinheiro</option>
-                    <option value="2">Débito</option>
-                    <option value="3">Crédito</option>
-                    <option value="4">Link de pagamento</option>
-                </select>
-
-                <label for="parcelas">Parcelas:</label>
-                <select name="parcelas" id="parcelas" required>
-                    <?php for ($i = 1; $i <= 12; $i++): ?>
-                        <option value="<?= $i ?>"><?= $i ?>x</option>
-                    <?php endfor; ?>
-                </select>
-
-                <div class="cardapio-botoes">
-                    <button type="submit">Calcular total</button>
-                    <input type="reset" value="Limpar">
+    <?php if (empty($produtos)): ?>
+        <div class="aviso">Ainda não há produtos cadastrados. Volte mais tarde!</div>
+    <?php else: ?>
+        <h2>Nossos produtos</h2>
+        <section class="lista">
+        <?php foreach ($produtos as $produto): ?>
+            <article class="produto">
+                <?php if (!empty($produto['imagem_url'])): ?>
+                    <img src="<?= h($produto['imagem_url']) ?>" alt="<?= h($produto['nome']) ?>">
+                <?php else: ?>
+                    <div class="sem-imagem">Sem imagem</div>
+                <?php endif; ?>
+                <div class="info">
+                    <h3><?= h($produto['nome']) ?></h3>
+                    <p class="preco">R$ <?= number_format((float)$produto['preco'], 2, ',', '.') ?></p>
                 </div>
-            </form>
+            </article>
+        <?php endforeach; ?>
+        </section>
 
-            <?php if ($erroPedido !== ''): ?>
-                <div class="cardapio-aviso" role="alert"><?= protegerCardapio($erroPedido) ?></div>
+        <form class="form" method="post" action="">
+            <h2 style="margin-top:0">Finalize seu pedido</h2>
+            <?php if (!isset($_SESSION['tipo']) || $_SESSION['tipo'] !== 'cliente'): ?>
+                <p>Para comprar, você precisa entrar na sua conta ou criar um cadastro.</p>
+                <p><a class="login-link" href="login.php">Entrar / Fazer cadastro</a></p>
             <?php endif; ?>
 
-            <?php if ($pedidoCalculado): ?>
-                <section class="cardapio-formulario" style="margin-top:20px;" aria-live="polite">
-                    <h2>Resumo do pedido</h2>
-                    <p>Quantidade: <strong><?= (int)$quantidade ?></strong></p>
-                    <p>Forma de pagamento:
-                        <strong><?= ['1' => 'Pix / Dinheiro', '2' => 'Débito', '3' => 'Crédito', '4' => 'Link de pagamento'][$opcoesPag] ?></strong>
-                    </p>
-                    <?php if ($opcoesPag === '3'): ?>
-                        <p>Parcelas: <strong><?= (int)$parcelas ?>x</strong></p>
-                    <?php endif; ?>
-                    <?php if ($saidaCalculo !== ''): ?>
-                        <div class="resultado-calculo"><?= $saidaCalculo ?></div>
-                    <?php elseif ($opcoesPag === '3' && is_numeric($valorJuros)): ?>
-                        <p class="produto-preco">Total com juros: R$ <?= number_format((float)$valorJuros, 2, ',', '.') ?></p>
-                    <?php elseif (is_numeric($resultado)): ?>
-                        <p class="produto-preco">Total: R$ <?= number_format((float)$resultado, 2, ',', '.') ?></p>
-                    <?php else: ?>
-                        <p>O cálculo foi realizado, mas a classe não retornou um valor para exibição.</p>
-                    <?php endif; ?>
-                </section>
-            <?php endif; ?>
-        <?php endif; ?>
-    </div>
+            <input type="hidden" name="token" value="<?= h($_SESSION['token_pedido']) ?>">
+
+            <label for="id_produto">Produto:</label>
+            <select name="id_produto" id="id_produto" required>
+                <option value="">Selecione um produto</option>
+                <?php foreach ($produtos as $produto): ?>
+                    <option value="<?= (int)$produto['id_produto'] ?>">
+                        <?= h($produto['nome']) ?> — R$ <?= number_format((float)$produto['preco'], 2, ',', '.') ?>
+                    </option>
+                <?php endforeach; ?>
+            </select>
+
+            <label for="quantidade">Quantidade:</label>
+            <input type="number" name="quantidade" id="quantidade" min="1" max="99" value="1" required>
+
+            <label for="forma_pagamento">Forma de pagamento:</label>
+            <select name="forma_pagamento" id="forma_pagamento" required>
+                <option value="1">Pix / Dinheiro</option>
+                <option value="2">Débito</option>
+                <option value="3">Crédito</option>
+                <option value="4">Link de pagamento</option>
+            </select>
+
+            <label for="parcelas">Parcelas (para cartão de crédito):</label>
+            <select name="parcelas" id="parcelas">
+                <?php for ($i=1; $i<=12; $i++): ?>
+                    <option value="<?= $i ?>"><?= $i ?>x</option>
+                <?php endfor; ?>
+            </select>
+
+            <button type="submit" name="finalizar_pedido" value="1">Finalizar pedido</button>
+        </form>
+    <?php endif; ?>
+</div>
 </main>
-
-<script>
-document.querySelectorAll('.produto-escolher').forEach(function(botao) {
-    botao.addEventListener('click', function() {
-        const preco = this.dataset.preco;
-        const seletor = document.getElementById('opcoes');
-        if (!seletor) return;
-
-        // Seleciona pelo valor do produto, sem depender da posição na lista.
-        seletor.value = preco;
-
-        document.querySelectorAll('.produto-escolher').forEach(function(item) {
-            item.classList.remove('selecionado');
-            item.textContent = 'Adicionar';
-        });
-
-        this.classList.add('selecionado');
-        this.textContent = 'Adicionado';
-        document.getElementById('formPedido').scrollIntoView({behavior:'smooth', block:'center'});
-    });
-});
-</script>
-
 <?php include "./classes/rodape.php"; ?>
