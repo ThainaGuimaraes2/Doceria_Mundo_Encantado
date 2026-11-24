@@ -1,983 +1,937 @@
 <?php
+declare(strict_types=1);
+session_start();
 
-// ======================================
-// 1. CONFIGURAÇÕES INICIAIS
-// ======================================
-
-ini_set('display_errors', 1);
-ini_set('display_startup_errors', 1);
-error_reporting(E_ALL);
-
-// Iniciar sessão
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
+if (($_SESSION['tipo'] ?? '') !== 'gestor') {
+    http_response_code(403);
+    exit('Acesso negado. Entre com uma conta de gestor.');
 }
 
-// Conectar ao banco de dados
-require_once "./config/database.php";
+const DB_HOST = '192.168.8.7';
+const DB_NAME = 'mtecpi5';
+const DB_USER = 'mtecpi5';
+const DB_PASS = 'mtecpi5';
+const UPLOAD_DIR = __DIR__ . '/uploads/funcionarios/';
+const UPLOAD_URL = 'uploads/funcionarios/';
 
-// Verificar conexão
-if (!isset($pdo)) {
-    die("Erro: conexão com o banco não encontrada.");
+function h(?string $value): string {
+    return htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
 }
 
-// ======================================
-// 2. VERIFICAR LOGIN
-// ======================================
+function db(): PDO {
+    static $pdo = null;
+    if ($pdo instanceof PDO) return $pdo;
 
-if (!isset($_SESSION['id'])) {
+    $dsn = 'mysql:host=' . DB_HOST . ';dbname=' . DB_NAME . ';charset=utf8mb4';
+    $pdo = new PDO($dsn, DB_USER, DB_PASS, [
+        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+        PDO::ATTR_EMULATE_PREPARES => false,
+    ]);
 
-    die("
-        <h2>Acesso não autorizado!</h2>
-        <p>Faça login para acessar o painel.</p>
-        <a href='login.php'>Voltar ao login</a>
-    ");
+    // Usa a tabela funcionarios já integrada ao login do sistema.
+    // Adiciona a coluna Foto somente se ela ainda não existir.
+    $employeeColumns = $pdo->query('SHOW COLUMNS FROM funcionarios')->fetchAll(PDO::FETCH_COLUMN);
+    if (!in_array('Foto', $employeeColumns, true)) {
+        $pdo->exec('ALTER TABLE funcionarios ADD COLUMN Foto VARCHAR(255) NULL AFTER perfil');
+    }
 
+    $pdo->exec("CREATE TABLE IF NOT EXISTS gestor_ingredientes (
+        id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        nome VARCHAR(120) NOT NULL,
+        quantidade DECIMAL(12,3) NOT NULL DEFAULT 0,
+        unidade VARCHAR(30) NOT NULL,
+        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_ingrediente_nome_unidade (nome, unidade)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+    return $pdo;
 }
 
-// ======================================
-// 3. VERIFICAR PERFIL DO FUNCIONÁRIO
-// ======================================
-
-$sql = "SELECT id_funcionarios, Nome, Email, perfil
-        FROM funcionarios
-        WHERE id_funcionarios = ?";
-
-$stmt = $pdo->prepare($sql);
-
-$stmt->execute([
-    $_SESSION['id']
-]);
-
-$gestor = $stmt->fetch(PDO::FETCH_ASSOC);
-
-// Conferir se o funcionário existe
-if (!$gestor) {
-    die("Funcionário não encontrado.");
+function csrfToken(): string {
+    if (empty($_SESSION['gestor_csrf'])) {
+        $_SESSION['gestor_csrf'] = bin2hex(random_bytes(32));
+    }
+    return $_SESSION['gestor_csrf'];
 }
 
-// Conferir permissão de gestor
-if (strtolower(trim($gestor['perfil'])) !== 'gestor') {
-
-    die("
-        <h2>Acesso negado!</h2>
-        <p>Somente gestores podem acessar este painel.</p>
-        <a href='login.php'>Voltar ao login</a>
-    ");
-
+function verifyCsrf(): void {
+    $token = $_POST['csrf'] ?? '';
+    if (!is_string($token) || !hash_equals(csrfToken(), $token)) {
+        throw new RuntimeException('Sua sessão expirou. Atualize a página e tente novamente.');
+    }
 }
 
-// ======================================
-// 4. FUNÇÃO PARA PROTEGER OS DADOS
-// ======================================
-
-function proteger($valor) {
-
-    return htmlspecialchars(
-        (string)$valor,
-        ENT_QUOTES,
-        'UTF-8'
-    );
-
-}
-
-// ======================================
-// 5. FUNÇÃO PARA EXIBIR MENSAGENS
-// ======================================
-
-function mensagem($texto, $tipo = 'sucesso') {
-
-    $_SESSION['mensagem_gestor'] = $texto;
-
-    $_SESSION['tipo_gestor'] = $tipo;
-
-    header("Location: gestor.php");
-
+function redirectWith(string $message, string $type = 'success'): never {
+    $_SESSION['gestor_flash'] = ['message' => $message, 'type' => $type];
+    header('Location: ' . strtok($_SERVER['REQUEST_URI'], '?'));
     exit;
-
 }
 
-// ======================================
-// 6. TOKEN DE SEGURANÇA
-// ======================================
+function saveEmployeePhoto(?string $oldPhoto = null): ?string {
+    if (!isset($_FILES['foto']) || $_FILES['foto']['error'] === UPLOAD_ERR_NO_FILE) {
+        return $oldPhoto;
+    }
 
-if (empty($_SESSION['token_gestor'])) {
+    $file = $_FILES['foto'];
+    if ($file['error'] !== UPLOAD_ERR_OK) {
+        throw new RuntimeException('Não foi possível enviar a foto.');
+    }
+    if ($file['size'] > 3 * 1024 * 1024) {
+        throw new RuntimeException('A foto deve ter no máximo 3 MB.');
+    }
 
-    $_SESSION['token_gestor'] = bin2hex(
-        random_bytes(32)
-    );
+    $finfo = new finfo(FILEINFO_MIME_TYPE);
+    $mime = $finfo->file($file['tmp_name']);
+    $allowed = [
+        'image/jpeg' => 'jpg',
+        'image/png' => 'png',
+        'image/webp' => 'webp',
+    ];
+    if (!isset($allowed[$mime])) {
+        throw new RuntimeException('Formato inválido. Use JPG, PNG ou WEBP.');
+    }
 
+    if (!is_dir(UPLOAD_DIR) && !mkdir(UPLOAD_DIR, 0755, true) && !is_dir(UPLOAD_DIR)) {
+        throw new RuntimeException('Não foi possível criar a pasta de fotos.');
+    }
+
+    $filename = bin2hex(random_bytes(16)) . '.' . $allowed[$mime];
+    if (!move_uploaded_file($file['tmp_name'], UPLOAD_DIR . $filename)) {
+        throw new RuntimeException('Falha ao salvar a foto no servidor.');
+    }
+
+    if ($oldPhoto) {
+        $oldPath = UPLOAD_DIR . basename($oldPhoto);
+        if (is_file($oldPath)) @unlink($oldPath);
+    }
+    return $filename;
 }
 
-$token = $_SESSION['token_gestor'];
-
-
-// ======================================
-// 6.1 IDENTIFICAR AS CHAVES PRIMÁRIAS
-// ======================================
-
-// Detecta automaticamente o nome da chave primária de cada tabela.
-// Assim, o painel funciona mesmo que a coluna não se chame "id".
-function obterChavePrimaria(PDO $pdo, string $tabela): string {
-
-    // Os nomes das tabelas são fixos e definidos neste arquivo.
-    $tabelasPermitidas = ['produto', 'ingredientes'];
-
-    if (!in_array($tabela, $tabelasPermitidas, true)) {
-        die("Tabela não permitida.");
-    }
-
-    $consulta = $pdo->query("SHOW KEYS FROM `{$tabela}` WHERE Key_name = 'PRIMARY'");
-    $chave = $consulta->fetch(PDO::FETCH_ASSOC);
-
-    if (!$chave || empty($chave['Column_name'])) {
-        die("A tabela {$tabela} não possui uma chave primária definida.");
-    }
-
-    return $chave['Column_name'];
-}
-
-$chaveProduto = obterChavePrimaria($pdo, 'produto');
-$chaveIngrediente = obterChavePrimaria($pdo, 'ingredientes');
-
-// Identificar a coluna de senha da tabela funcionarios.
-$colunasFuncionarios = $pdo->query("SHOW COLUMNS FROM funcionarios")->fetchAll(PDO::FETCH_COLUMN);
-$colunaSenha = null;
-foreach (['Senha', 'senha', 'senha_funcionario', 'Senha_funcionario'] as $possivel) {
-    if (in_array($possivel, $colunasFuncionarios, true)) {
-        $colunaSenha = $possivel;
-        break;
+function removeEmployeePhoto(?string $photo): void {
+    if ($photo) {
+        $path = UPLOAD_DIR . basename($photo);
+        if (is_file($path)) @unlink($path);
     }
 }
-if ($colunaSenha === null) {
-    die("Não encontrei a coluna de senha na tabela funcionarios. Verifique se ela se chama Senha ou senha.");
+
+
+const PRODUCT_UPLOAD_DIR = __DIR__ . '/uploads/produtos/';
+const PRODUCT_UPLOAD_URL = 'uploads/produtos/';
+
+function saveProductImage(?string $oldImage = null): ?string {
+    if (!isset($_FILES['imagem_produto']) || $_FILES['imagem_produto']['error'] === UPLOAD_ERR_NO_FILE) {
+        return $oldImage;
+    }
+    $file = $_FILES['imagem_produto'];
+    if ($file['error'] !== UPLOAD_ERR_OK) throw new RuntimeException('Não foi possível enviar a imagem do produto.');
+    if ($file['size'] > 5 * 1024 * 1024) throw new RuntimeException('A imagem do produto deve ter no máximo 5 MB.');
+    $finfo = new finfo(FILEINFO_MIME_TYPE);
+    $mime = $finfo->file($file['tmp_name']);
+    $allowed = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/webp' => 'webp'];
+    if (!isset($allowed[$mime])) throw new RuntimeException('Formato inválido. Use JPG, PNG ou WEBP.');
+    if (!is_dir(PRODUCT_UPLOAD_DIR) && !mkdir(PRODUCT_UPLOAD_DIR, 0755, true) && !is_dir(PRODUCT_UPLOAD_DIR)) {
+        throw new RuntimeException('Não foi possível criar a pasta de imagens dos produtos.');
+    }
+    $filename = bin2hex(random_bytes(16)) . '.' . $allowed[$mime];
+    if (!move_uploaded_file($file['tmp_name'], PRODUCT_UPLOAD_DIR . $filename)) {
+        throw new RuntimeException('Falha ao salvar a imagem do produto.');
+    }
+    if ($oldImage && str_starts_with($oldImage, PRODUCT_UPLOAD_URL)) {
+        $oldPath = PRODUCT_UPLOAD_DIR . basename($oldImage);
+        if (is_file($oldPath)) @unlink($oldPath);
+    }
+    return PRODUCT_UPLOAD_URL . $filename;
 }
 
-// ======================================
-// 7. PROCESSAR AÇÕES DO GESTOR
-// ======================================
-
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-
-    if (
-        !isset($_POST['token']) ||
-        !hash_equals($token, $_POST['token'])
-    ) {
-        mensagem("Token de segurança inválido.", "erro");
+function removeProductImage(?string $image): void {
+    if ($image && str_starts_with($image, PRODUCT_UPLOAD_URL)) {
+        $path = PRODUCT_UPLOAD_DIR . basename($image);
+        if (is_file($path)) @unlink($path);
     }
-
-    $acao = $_POST['acao'] ?? '';
-
-    // CADASTRAR FUNCIONARIO
-    if ($acao === 'cadastrar_funcionario') {
-
-        $nomeFuncionario = trim($_POST['nome_funcionario'] ?? '');
-        $emailFuncionario = trim($_POST['email_funcionario'] ?? '');
-        $senhaFuncionario = $_POST['senha_funcionario'] ?? '';
-        $cpfFuncionario = trim($_POST['cpf_funcionario'] ?? '');
-
-        if ($nomeFuncionario === '' || !filter_var($emailFuncionario, FILTER_VALIDATE_EMAIL) || strlen($senhaFuncionario) < 6 || $cpfFuncionario === '') {
-            mensagem("Informe nome, e-mail válido, CPF e senha com pelo menos 6 caracteres.", "erro");
-        }
-
-        // Impedir cadastro de e-mail já utilizado.
-        $verificaEmail = $pdo->prepare("SELECT COUNT(*) FROM funcionarios WHERE Email = ?");
-        $verificaEmail->execute([$emailFuncionario]);
-        if ((int)$verificaEmail->fetchColumn() > 0) {
-            mensagem("Já existe um funcionário cadastrado com esse e-mail.", "erro");
-        }
-
-        $senhaHash = password_hash($senhaFuncionario, PASSWORD_DEFAULT);
-        $sqlCadastro = "INSERT INTO funcionarios (Nome, Email, `{$colunaSenha}`, CPF, perfil) VALUES (?, ?, ?, ?, ?)";
-        $stmt = $pdo->prepare($sqlCadastro);
-        $stmt->execute([$nomeFuncionario, $emailFuncionario, $senhaHash, $cpfFuncionario, 'funcionarios']);
-
-        mensagem("Funcionário cadastrado com sucesso!");
-    }
-
-    // CADASTRAR PRODUTO
-    if ($acao === 'cadastrar_produto') {
-
-        $nome = trim($_POST['nome'] ?? '');
-        $preco = $_POST['preco'] ?? 0;
-        $imagemUrl = null;
-
-        if ($nome === '' || !is_numeric($preco) || $preco < 0) {
-            mensagem("Preencha os dados corretamente.", "erro");
-        }
-
-        // A imagem é opcional. Quando enviada, valida o tipo e o tamanho.
-        if (isset($_FILES['imagem']) && $_FILES['imagem']['error'] !== UPLOAD_ERR_NO_FILE) {
-            if ($_FILES['imagem']['error'] !== UPLOAD_ERR_OK) {
-                mensagem("Não foi possível enviar a imagem.", "erro");
-            }
-
-            if ($_FILES['imagem']['size'] > 5 * 1024 * 1024) {
-                mensagem("A imagem deve ter no máximo 5 MB.", "erro");
-            }
-
-            $informacoesImagem = @getimagesize($_FILES['imagem']['tmp_name']);
-            $tiposPermitidos = [
-                IMAGETYPE_JPEG => 'jpg',
-                IMAGETYPE_PNG  => 'png',
-                IMAGETYPE_WEBP => 'webp'
-            ];
-
-            if ($informacoesImagem === false || !isset($tiposPermitidos[$informacoesImagem[2]])) {
-                mensagem("Envie uma imagem válida nos formatos JPG, PNG ou WEBP.", "erro");
-            }
-
-            $pastaImagens = __DIR__ . '/uploads/produtos';
-
-            if (!is_dir($pastaImagens) && !mkdir($pastaImagens, 0755, true)) {
-                mensagem("Não foi possível criar a pasta de imagens.", "erro");
-            }
-
-            $nomeArquivo = bin2hex(random_bytes(16)) . '.' . $tiposPermitidos[$informacoesImagem[2]];
-            $destinoImagem = $pastaImagens . '/' . $nomeArquivo;
-
-            if (!move_uploaded_file($_FILES['imagem']['tmp_name'], $destinoImagem)) {
-                mensagem("Não foi possível salvar a imagem enviada.", "erro");
-            }
-
-            $imagemUrl = 'uploads/produtos/' . $nomeArquivo;
-        }
-
-        $stmt = $pdo->prepare(
-            "INSERT INTO produto (nome, preco, imagem_url, id_funcionarios)
-             VALUES (?, ?, ?, ?)"
-        );
-
-        $stmt->execute([$nome, $preco, $imagemUrl, $_SESSION['id']]);
-
-        mensagem("Produto cadastrado com sucesso!");
-    }
-
-    // EXCLUIR PRODUTO
-    if ($acao === 'excluir_produto') {
-
-        $id = (int)($_POST['id'] ?? 0);
-
-        // Recupera o caminho da imagem antes de excluir o produto.
-        $buscaImagem = $pdo->prepare(
-            "SELECT imagem_url FROM produto WHERE `{$chaveProduto}` = ?"
-        );
-        $buscaImagem->execute([$id]);
-        $imagemAntiga = $buscaImagem->fetchColumn();
-
-        $stmt = $pdo->prepare(
-            "DELETE FROM produto WHERE `{$chaveProduto}` = ?"
-        );
-        $stmt->execute([$id]);
-
-        // Remove somente arquivos armazenados na pasta de imagens dos produtos.
-        if ($imagemAntiga && strpos($imagemAntiga, 'uploads/produtos/') === 0) {
-            $arquivoImagem = __DIR__ . '/' . $imagemAntiga;
-            if (is_file($arquivoImagem)) {
-                unlink($arquivoImagem);
-            }
-        }
-
-        mensagem("Produto excluído!");
-    }
-
-    // CADASTRAR INGREDIENTE
-    if ($acao === 'cadastrar_ingrediente') {
-
-        $nome = trim($_POST['nome'] ?? '');
-        $dataValidade = $_POST['data_validade'] ?? '';
-
-        if ($nome === '' || $dataValidade === '') {
-            mensagem("Informe o nome e a data de validade do ingrediente.", "erro");
-        }
-
-        $stmt = $pdo->prepare(
-            "INSERT INTO ingredientes (nome, data_validade)
-             VALUES (?, ?)"
-        );
-
-        $stmt->execute([$nome, $dataValidade]);
-
-        mensagem("Ingrediente cadastrado!");
-    }
-
-    // EXCLUIR INGREDIENTE
-    if ($acao === 'excluir_ingrediente') {
-
-        $id = (int)($_POST['id'] ?? 0);
-
-        $stmt = $pdo->prepare(
-            "DELETE FROM ingredientes WHERE `{$chaveIngrediente}` = ?"
-        );
-
-        $stmt->execute([$id]);
-
-        mensagem("Ingrediente excluído!");
-    }
-
-
-    // CADASTRAR UNIDADE / INGREDIENTE DE RECEITA
-    if ($acao === 'cadastrar_unidade') {
-        $idReceita = (int)($_POST['id_receita'] ?? 0);
-        $idIngrediente = (int)($_POST['id_ingredientes'] ?? 0);
-        $quantidade = $_POST['quantidade'] ?? '';
-        $sigla = trim($_POST['sigla_quantidade'] ?? '');
-
-        if ($idReceita <= 0 || $idIngrediente <= 0 || !is_numeric($quantidade) || $quantidade <= 0 || $sigla === '') {
-            mensagem("Preencha corretamente todos os dados da unidade.", "erro");
-        }
-
-        $stmt = $pdo->prepare(
-            "INSERT INTO unidades (id_receita, id_ingredientes, quantidade, sigla_quantidade)
-             VALUES (?, ?, ?, ?)"
-        );
-        $stmt->execute([$idReceita, $idIngrediente, $quantidade, $sigla]);
-
-        mensagem("Unidade cadastrada com sucesso!");
-    }
-
-    // EXCLUIR UNIDADE
-    if ($acao === 'excluir_unidade') {
-        $id = (int)($_POST['id'] ?? 0);
-        $stmt = $pdo->prepare("DELETE FROM unidades WHERE id_unidades = ?");
-        $stmt->execute([$id]);
-        mensagem("Unidade excluída!");
-    }
-
 }
-// ======================================
-// 8. BUSCAR PRODUTOS
-// ======================================
 
-$consultaProdutos = $pdo->query(
-    "SELECT *, `{$chaveProduto}` AS id FROM produto ORDER BY `{$chaveProduto}` DESC"
-);
+$pdo = null;
+$dbError = null;
+try {
+    $pdo = db();
+} catch (Throwable $e) {
+    $dbError = 'Não foi possível conectar ao banco de dados. Confira as configurações DB_HOST, DB_NAME, DB_USER e DB_PASS no início do arquivo.';
+}
 
-$produtos = $consultaProdutos->fetchAll(PDO::FETCH_ASSOC);
+if ($pdo && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    try {
+        verifyCsrf();
+        $action = $_POST['action'] ?? '';
+
+        if ($action === 'save_employee') {
+            $id = (int)($_POST['id'] ?? 0);
+            $nome = trim((string)($_POST['nome'] ?? ''));
+            $email = trim((string)($_POST['email'] ?? ''));
+            $cpf = trim((string)($_POST['cpf'] ?? ''));
+            $senha = (string)($_POST['senha'] ?? '');
+            $perfil = (string)($_POST['perfil'] ?? 'funcionarios');
+
+            if ($nome === '' || $email === '' || $cpf === '') {
+                throw new RuntimeException('Preencha nome, e-mail e CPF.');
+            }
+            if (!filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($email) > 40) {
+                throw new RuntimeException('Informe um e-mail válido com até 40 caracteres.');
+            }
+            if (strlen($nome) > 100) throw new RuntimeException('O nome deve ter até 100 caracteres.');
+            if (strlen($cpf) > 14) throw new RuntimeException('O CPF deve ter até 14 caracteres.');
+            if (!in_array($perfil, ['funcionarios', 'gestor'], true)) {
+                throw new RuntimeException('Selecione um perfil válido.');
+            }
+
+            $existing = null;
+            if ($id > 0) {
+                $stmt = $pdo->prepare('SELECT id_funcionarios, Foto, Senha FROM funcionarios WHERE id_funcionarios = ?');
+                $stmt->execute([$id]);
+                $existing = $stmt->fetch();
+                if (!$existing) throw new RuntimeException('Cadastro não encontrado.');
+            }
+            if ($id === 0 && $senha === '') throw new RuntimeException('Informe uma senha para o novo cadastro.');
+            if ($senha !== '' && strlen($senha) < 6) throw new RuntimeException('A senha deve ter pelo menos 6 caracteres.');
+
+            $duplicate = $pdo->prepare('SELECT COUNT(*) FROM funcionarios WHERE (Email = ? OR CPF = ?) AND id_funcionarios <> ?');
+            $duplicate->execute([$email, $cpf, $id]);
+            if ((int)$duplicate->fetchColumn() > 0) throw new RuntimeException('Já existe um cadastro com esse e-mail ou CPF.');
+
+            $oldPhoto = $existing['Foto'] ?? null;
+            $photo = saveEmployeePhoto($oldPhoto);
+            if ($id > 0) {
+                if ($senha !== '') {
+                    $hash = password_hash($senha, PASSWORD_DEFAULT);
+                    $stmt = $pdo->prepare('UPDATE funcionarios SET Nome=?, Email=?, Senha=?, CPF=?, perfil=?, Foto=? WHERE id_funcionarios=?');
+                    $stmt->execute([$nome, $email, $hash, $cpf, $perfil, $photo, $id]);
+                } else {
+                    $stmt = $pdo->prepare('UPDATE funcionarios SET Nome=?, Email=?, CPF=?, perfil=?, Foto=? WHERE id_funcionarios=?');
+                    $stmt->execute([$nome, $email, $cpf, $perfil, $photo, $id]);
+                }
+                redirectWith('Cadastro atualizado com sucesso.');
+            }
+
+            $hash = password_hash($senha, PASSWORD_DEFAULT);
+            $stmt = $pdo->prepare('INSERT INTO funcionarios (Nome, Email, Senha, CPF, perfil, Foto) VALUES (?, ?, ?, ?, ?, ?)');
+            $stmt->execute([$nome, $email, $hash, $cpf, $perfil, $photo]);
+            redirectWith($perfil === 'gestor' ? 'Novo gestor cadastrado com sucesso.' : 'Funcionário cadastrado com sucesso.');
+        }
+
+        if ($action === 'delete_employee') {
+            $id = (int)($_POST['id'] ?? 0);
+            if ($id === (int)($_SESSION['id'] ?? 0)) {
+                throw new RuntimeException('Você não pode excluir o próprio usuário enquanto estiver conectado.');
+            }
+            $stmt = $pdo->prepare('SELECT Foto FROM funcionarios WHERE id_funcionarios=?');
+            $stmt->execute([$id]);
+            $employee = $stmt->fetch();
+            if (!$employee) throw new RuntimeException('Cadastro não encontrado.');
+            $pdo->prepare('DELETE FROM funcionarios WHERE id_funcionarios=?')->execute([$id]);
+            removeEmployeePhoto($employee['Foto'] ?? null);
+            redirectWith('Cadastro excluído com sucesso.');
+        }
+
+        if ($action === 'save_ingredient') {
+            $id = (int)($_POST['id'] ?? 0);
+            $nome = trim((string)($_POST['nome_ingrediente'] ?? ''));
+            $quantidadeRaw = str_replace(',', '.', trim((string)($_POST['quantidade'] ?? '')));
+            $unidade = trim((string)($_POST['unidade'] ?? ''));
+
+            if ($nome === '' || $unidade === '' || $quantidadeRaw === '' || !is_numeric($quantidadeRaw)) {
+                throw new RuntimeException('Informe nome, quantidade numérica e unidade do ingrediente.');
+            }
+            $quantidade = (float)$quantidadeRaw;
+            if ($quantidade < 0) throw new RuntimeException('A quantidade não pode ser negativa.');
+
+            if ($id > 0) {
+                $stmt = $pdo->prepare('UPDATE gestor_ingredientes SET nome=?, quantidade=?, unidade=? WHERE id=?');
+                $stmt->execute([$nome, $quantidade, $unidade, $id]);
+                redirectWith('Ingrediente atualizado com sucesso.');
+            } else {
+                $stmt = $pdo->prepare('INSERT INTO gestor_ingredientes (nome,quantidade,unidade) VALUES (?,?,?)');
+                $stmt->execute([$nome, $quantidade, $unidade]);
+                redirectWith('Ingrediente cadastrado com sucesso.');
+            }
+        }
+
+        if ($action === 'delete_ingredient') {
+            $id = (int)($_POST['id'] ?? 0);
+            $stmt = $pdo->prepare('DELETE FROM gestor_ingredientes WHERE id=?');
+            $stmt->execute([$id]);
+            if ($stmt->rowCount() === 0) throw new RuntimeException('Ingrediente não encontrado.');
+            redirectWith('Ingrediente excluído. Atenção: esta tabela independente não atualiza automaticamente receitas de outras tabelas.');
+        }
 
 
-// ======================================
-// 9. BUSCAR INGREDIENTES
-// ======================================
+        if ($action === 'save_product') {
+            $id = (int)($_POST['id'] ?? 0);
+            $nome = trim((string)($_POST['nome_produto'] ?? ''));
+            $precoRaw = str_replace(',', '.', trim((string)($_POST['preco_produto'] ?? '')));
+            if ($nome === '' || $precoRaw === '' || !is_numeric($precoRaw) || (float)$precoRaw < 0) {
+                throw new RuntimeException('Informe o nome e um preço válido para o produto.');
+            }
+            $oldImage = null;
+            if ($id > 0) {
+                $stmt = $pdo->prepare('SELECT imagem_url FROM produto WHERE id_produto = ?');
+                $stmt->execute([$id]);
+                $existing = $stmt->fetch();
+                if (!$existing) throw new RuntimeException('Produto não encontrado.');
+                $oldImage = $existing['imagem_url'] ?? null;
+            }
+            $image = saveProductImage($oldImage);
+            $columns = $pdo->query('SHOW COLUMNS FROM produto')->fetchAll(PDO::FETCH_COLUMN);
+            if ($id > 0) {
+                $stmt = $pdo->prepare('UPDATE produto SET nome=?, preco=?, imagem_url=? WHERE id_produto=?');
+                $stmt->execute([$nome, $precoRaw, $image, $id]);
+                redirectWith('Produto atualizado com sucesso.');
+            }
+            if (in_array('id_funcionarios', $columns, true)) {
+                $stmt = $pdo->prepare('INSERT INTO produto (nome, preco, imagem_url, id_funcionarios) VALUES (?, ?, ?, ?)');
+                $stmt->execute([$nome, $precoRaw, $image, $_SESSION['id'] ?? null]);
+            } else {
+                $stmt = $pdo->prepare('INSERT INTO produto (nome, preco, imagem_url) VALUES (?, ?, ?)');
+                $stmt->execute([$nome, $precoRaw, $image]);
+            }
+            redirectWith('Produto cadastrado e enviado ao cardápio com sucesso.');
+        }
 
-$consultaIngredientes = $pdo->query(
-    "SELECT *, `{$chaveIngrediente}` AS id FROM ingredientes ORDER BY `{$chaveIngrediente}` DESC"
-);
+        if ($action === 'delete_product') {
+            $id = (int)($_POST['id'] ?? 0);
+            $stmt = $pdo->prepare('SELECT imagem_url FROM produto WHERE id_produto=?');
+            $stmt->execute([$id]);
+            $product = $stmt->fetch();
+            if (!$product) throw new RuntimeException('Produto não encontrado.');
+            $check = $pdo->prepare('SELECT COUNT(*) FROM receita WHERE id_produto=?');
+            $check->execute([$id]);
+            if ((int)$check->fetchColumn() > 0) throw new RuntimeException('Este produto possui receitas cadastradas. Exclua primeiro as receitas vinculadas.');
+            $pdo->prepare('DELETE FROM produto WHERE id_produto=?')->execute([$id]);
+            removeProductImage($product['imagem_url'] ?? null);
+            redirectWith('Produto excluído com sucesso.');
+        }
 
-$ingredientes = $consultaIngredientes->fetchAll(PDO::FETCH_ASSOC);
+        if ($action === 'save_recipe') {
+            $id = (int)($_POST['id'] ?? 0);
+            $idProduto = (int)($_POST['id_produto'] ?? 0);
+            $nome = trim((string)($_POST['nome_receita'] ?? ''));
+            $descricao = trim((string)($_POST['descricao_receita'] ?? ''));
+            $modo = trim((string)($_POST['modo_preparo'] ?? ''));
+            if ($idProduto <= 0 || $nome === '') throw new RuntimeException('Selecione um produto e informe o nome da receita.');
+            $check = $pdo->prepare('SELECT COUNT(*) FROM produto WHERE id_produto=?');
+            $check->execute([$idProduto]);
+            if (!(int)$check->fetchColumn()) throw new RuntimeException('Produto selecionado não encontrado.');
+            if ($id > 0) {
+                $stmt = $pdo->prepare('UPDATE receita SET id_produto=?, nome_receita=?, descricao=?, modo_preparo=? WHERE id_receita=?');
+                $stmt->execute([$idProduto, $nome, $descricao ?: null, $modo ?: null, $id]);
+                redirectWith('Receita atualizada com sucesso.');
+            }
+            $stmt = $pdo->prepare('INSERT INTO receita (id_produto, nome_receita, descricao, modo_preparo) VALUES (?, ?, ?, ?)');
+            $stmt->execute([$idProduto, $nome, $descricao ?: null, $modo ?: null]);
+            redirectWith('Receita cadastrada com sucesso.');
+        }
 
- // ======================================
- // 9.1 BUSCAR UNIDADES
- // ======================================
+        if ($action === 'delete_recipe') {
+            $id = (int)($_POST['id'] ?? 0);
+            $pdo->beginTransaction();
+            $pdo->prepare('DELETE FROM unidades WHERE id_receita=?')->execute([$id]);
+            $stmt = $pdo->prepare('DELETE FROM receita WHERE id_receita=?');
+            $stmt->execute([$id]);
+            if ($stmt->rowCount() === 0) { $pdo->rollBack(); throw new RuntimeException('Receita não encontrada.'); }
+            $pdo->commit();
+            redirectWith('Receita e suas unidades foram excluídas.');
+        }
 
-$consultaUnidades = $pdo->query(
-    "SELECT u.id_unidades, u.id_receita, u.quantidade, u.sigla_quantidade,
-            i.nome AS ingrediente
-     FROM unidades u
-     INNER JOIN ingredientes i ON i.id_ingredientes = u.id_ingredientes
-     ORDER BY u.id_unidades DESC"
-);
-$unidades = $consultaUnidades->fetchAll(PDO::FETCH_ASSOC);
+        if ($action === 'save_unit') {
+            $id = (int)($_POST['id'] ?? 0);
+            $idReceita = (int)($_POST['id_receita'] ?? 0);
+            $idIngrediente = (int)($_POST['id_ingredientes'] ?? 0);
+            $quantidadeRaw = str_replace(',', '.', trim((string)($_POST['quantidade_unidade'] ?? '')));
+            $sigla = trim((string)($_POST['sigla_quantidade'] ?? ''));
+            $unidadesPermitidas = ['g', 'kg', 'mg', 'ml', 'L', 'un', 'pacote', 'caixa', 'colher_sopa', 'colher_cha', 'xicara'];
+            if ($idReceita <= 0 || $idIngrediente <= 0 || $quantidadeRaw === '' || !is_numeric($quantidadeRaw) || (float)$quantidadeRaw <= 0 || !in_array($sigla, $unidadesPermitidas, true)) {
+                throw new RuntimeException('Selecione uma unidade de medida válida e informe receita, ingrediente e quantidade corretamente.');
+            }
+            if ($id > 0) {
+                $stmt = $pdo->prepare('UPDATE unidades SET id_receita=?, id_ingredientes=?, quantidade=?, sigla_quantidade=? WHERE id_unidades=?');
+                $stmt->execute([$idReceita, $idIngrediente, $quantidadeRaw, $sigla, $id]);
+                redirectWith('Unidade da receita atualizada com sucesso.');
+            }
+            $stmt = $pdo->prepare('INSERT INTO unidades (id_receita, id_ingredientes, quantidade, sigla_quantidade) VALUES (?, ?, ?, ?)');
+            $stmt->execute([$idReceita, $idIngrediente, $quantidadeRaw, $sigla]);
+            redirectWith('Ingrediente adicionado à receita com sucesso.');
+        }
 
+        if ($action === 'delete_unit') {
+            $id = (int)($_POST['id'] ?? 0);
+            $stmt = $pdo->prepare('DELETE FROM unidades WHERE id_unidades=?');
+            $stmt->execute([$id]);
+            if ($stmt->rowCount() === 0) throw new RuntimeException('Unidade não encontrada.');
+            redirectWith('Ingrediente removido da receita.');
+        }
 
+        throw new RuntimeException('Ação inválida.');
+    } catch (PDOException $e) {
+        $message = $e->getCode() === '23000'
+            ? 'Já existe um ingrediente com esse nome e unidade.'
+            : 'O banco de dados não conseguiu concluir a operação. Verifique os dados e tente novamente.';
+        redirectWith($message, 'error');
+    } catch (Throwable $e) {
+        redirectWith($e->getMessage(), 'error');
+    }
+}
 
-// ======================================
-// 10. BUSCAR FUNCIONARIOS
-// ======================================
+$flash = $_SESSION['gestor_flash'] ?? null;
+unset($_SESSION['gestor_flash']);
 
-$consultaFuncionarios = $pdo->query(
-    "SELECT id_funcionarios, Nome, Email, perfil FROM funcionarios ORDER BY id_funcionarios DESC"
-);
-$funcionarios = $consultaFuncionarios->fetchAll(PDO::FETCH_ASSOC);
-
-// ======================================
-// 11. CONTADORES
-// ======================================
-
-$totalProdutos = count($produtos);
-$totalIngredientes = count($ingredientes);
-$totalFuncionarios = count($funcionarios);
-$totalUnidades = count($unidades);
-
+$employees = [];
+$ingredients = [];
+$products = [];
+$recipes = [];
+$recipeUnits = [];
+$realIngredients = [];
+if ($pdo) {
+    $employees = $pdo->query('SELECT id_funcionarios, Nome, Email, CPF, perfil, Foto FROM funcionarios ORDER BY Nome')->fetchAll();
+    $ingredients = $pdo->query('SELECT * FROM gestor_ingredientes ORDER BY nome')->fetchAll();
+    $products = $pdo->query('SELECT id_produto, nome, preco, imagem_url FROM produto ORDER BY nome')->fetchAll();
+    $recipes = $pdo->query('SELECT r.id_receita, r.id_produto, r.nome_receita, r.descricao, r.modo_preparo, p.nome AS produto_nome FROM receita r INNER JOIN produto p ON p.id_produto=r.id_produto ORDER BY p.nome, r.nome_receita')->fetchAll();
+    $realIngredients = $pdo->query('SELECT id_ingredientes, nome FROM ingredientes ORDER BY nome')->fetchAll();
+    $recipeUnits = $pdo->query('SELECT u.id_unidades, u.id_receita, u.id_ingredientes, u.quantidade, u.sigla_quantidade, i.nome AS ingrediente_nome FROM unidades u INNER JOIN ingredientes i ON i.id_ingredientes=u.id_ingredientes ORDER BY u.id_receita, u.id_unidades')->fetchAll();
+}
 ?>
-
 <!DOCTYPE html>
-<html lang="pt-br">
-
+<html lang="pt-BR">
 <head>
-
 <meta charset="UTF-8">
-
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-
-<title>Painel do Gestor</title>
-
+<title>Painel do Gestor | Doceria Mundo Encantado</title>
 <style>
 :root {
-    --rosa-fundo: #f7e1e7;
-    --rosa-claro: #fbeef1;
-    --rosa-destaque: #f4c9d5;
-    --pessego: #f6d1a5;
-    --marrom: #76545a;
-    --marrom-escuro: #62434a;
-    --roxo: #9850dc;
-    --branco: #fffdfc;
-    --borda: #ead3d8;
+    --pink: #f8e1e5;
+    --pink-dark: #efd0d7;
+    --brown: #704b50;
+    --brown-button: #80545d;
+    --cream: #fffdf9;
+    --border: #e5cfd2;
+    --muted: #8b7074;
 }
-
-* {
-    margin: 0;
-    padding: 0;
-    box-sizing: border-box;
-}
-
+* { box-sizing: border-box; }
 body {
-    font-family: Georgia, 'Times New Roman', serif;
-    background: var(--rosa-fundo);
-    color: var(--marrom);
-    line-height: 1.5;
-    min-height: 100vh;
-    border: 4px solid var(--roxo);
-    outline: 1px solid #d9b7ee;
-    outline-offset: -10px;
-}
-
-header {
-    background: var(--rosa-fundo);
-    color: var(--marrom-escuro);
-    padding: 30px 20px;
-    text-align: center;
-    border-bottom: 1px solid var(--borda);
-}
-
-header h1 {
-    font-size: clamp(26px, 4vw, 36px);
-    font-weight: normal;
-    letter-spacing: .3px;
-    margin-bottom: 5px;
-}
-
-header p {
-    font-size: 14px;
-    letter-spacing: .5px;
-}
-
-.container {
-    width: min(90%, 1100px);
-    margin: 38px auto;
-}
-
-.cards {
-    display: flex;
-    gap: 20px;
-    margin-bottom: 30px;
-    flex-wrap: wrap;
-}
-
-.card {
-    background: var(--branco);
-    padding: 25px;
-    border: 1px solid var(--borda);
-    border-radius: 3px;
-    flex: 1;
-    min-width: 200px;
-    box-shadow: 0 3px 12px rgba(118, 84, 90, .07);
-}
-
-.card h3 {
-    color: #98777d;
-    font-size: 15px;
-    font-weight: normal;
-    margin-bottom: 10px;
-}
-
-.card p {
-    font-size: 30px;
-    font-weight: bold;
-    color: var(--marrom-escuro);
-}
-
-.secao {
-    background: var(--branco);
-    padding: 28px;
-    border: 1px solid var(--borda);
-    border-radius: 3px;
-    margin-bottom: 26px;
-    box-shadow: 0 3px 12px rgba(118, 84, 90, .06);
-}
-
-.secao h2 {
-    margin-bottom: 20px;
-    color: var(--marrom-escuro);
-    font-size: 23px;
-    font-weight: normal;
-}
-
-input, select {
-    display: block;
-    padding: 13px 14px;
-    width: 100%;
-    margin-bottom: 14px;
-    border: 1px solid #dfcdd1;
-    border-radius: 2px;
-    background: #fff;
-    color: var(--marrom-escuro);
-    font: 14px Georgia, 'Times New Roman', serif;
-    transition: border-color .2s, box-shadow .2s;
-}
-
-input::placeholder {
-    color: #ad999d;
-}
-
-input:focus, select:focus {
-    outline: none;
-    border-color: #c58b9a;
-    box-shadow: 0 0 0 3px rgba(244, 201, 213, .35);
-}
-
-button {
-    padding: 12px 21px;
-    border: 1px solid var(--marrom);
-    border-radius: 2px;
-    cursor: pointer;
-    background: var(--marrom);
-    color: #fffaf8;
-    font: bold 14px Georgia, 'Times New Roman', serif;
-    transition: background .2s, transform .2s;
-}
-
-button:hover {
-    background: var(--marrom-escuro);
-    transform: translateY(-1px);
-}
-
-.excluir {
-    background: #b96d78;
-    border-color: #b96d78;
-}
-
-.excluir:hover {
-    background: #9f5662;
-}
-
-table {
-    width: 100%;
-    border-collapse: collapse;
-    margin-top: 20px;
-    background: #fff;
-}
-
-th, td {
-    padding: 13px 14px;
-    border-bottom: 1px solid #f0e2e5;
-    text-align: left;
-    vertical-align: middle;
-}
-
-th {
-    background: var(--rosa-claro);
-    color: var(--marrom-escuro);
-    font-weight: bold;
-}
-
-td {
-    color: #765e63;
-}
-
-td form {
     margin: 0;
+    background: #f7f3f3;
+    color: var(--brown);
+    font-family: Georgia, "Times New Roman", serif;
 }
-
-.mensagem {
-    padding: 15px 18px;
-    background: #f1e8dc;
-    color: #66523f;
-    border: 1px solid #e4d2bd;
-    border-radius: 3px;
-    margin-bottom: 20px;
+header {
+    background: var(--pink);
+    border-bottom: 1px solid var(--border);
+    padding: 22px 6%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
 }
-
-.erro {
-    background: #f9e5e7;
-    color: #8d414b;
-    border-color: #e8c2c8;
+.brand { font-size: 23px; }
+.brand small {
+    display: block;
+    font: 10px Arial, sans-serif;
+    letter-spacing: 4px;
+    margin-top: 4px;
 }
+header a { color: var(--brown); text-decoration: none; }
+main { max-width: 1180px; margin: 38px auto; padding: 0 20px 50px; }
+.eyebrow { font: bold 11px Arial, sans-serif; letter-spacing: 3px; }
+h1 { font-size: 36px; font-weight: normal; margin: 10px 0; }
+.intro { color: var(--muted); line-height: 1.6; margin-bottom: 28px; }
+.notice {
+    padding: 13px 16px; border-radius: 5px; margin: 18px 0;
+    background: #e8f4e8; color: #315c37;
+}
+.notice.error { background: #fbe9e8; color: #8b3333; }
+.tabs { display: flex; flex-wrap: wrap; gap: 10px; margin: 24px 0; }
+.tab {
+    border: 1px solid var(--border); background: var(--cream);
+    color: var(--brown); padding: 11px 18px; border-radius: 25px;
+    cursor: pointer; font: 15px Georgia, serif;
+}
+.tab.active { background: #f4d7a0; border-color: #f4d7a0; }
+.panel { display: none; }
+.panel.active { display: block; }
+.layout {
+    display: grid; grid-template-columns: minmax(260px, .8fr) minmax(0, 1.5fr);
+    gap: 22px; align-items: start;
+}
+.card {
+    background: var(--cream); border: 1px solid #eee3e2;
+    border-radius: 7px; padding: 23px; box-shadow: 0 5px 18px #704b500b;
+}
+h2 { font-size: 23px; font-weight: normal; margin: 0 0 18px; }
+label { display: block; font-weight: bold; margin: 13px 0 7px; }
+input, select {
+    width: 100%; padding: 11px 12px; border: 1px solid #d9c8c8;
+    border-radius: 4px; background: white; color: var(--brown);
+    font: 15px Georgia, serif;
+}
+input:focus, select:focus { outline: 2px solid #eacbd2; border-color: #a8757e; }
+button, .button {
+    display: inline-block; border: 0; border-radius: 4px;
+    background: var(--brown-button); color: white; padding: 11px 16px;
+    font: bold 14px Georgia, serif; cursor: pointer; text-decoration: none;
+}
+button:hover, .button:hover { background: #633e46; }
+.secondary { background: transparent; color: var(--brown-button); border: 1px solid var(--brown-button); }
+.danger { background: #a34e55; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; min-width: 560px; }
+th, td { padding: 12px 10px; text-align: left; border-bottom: 1px solid #eee3e2; vertical-align: middle; }
+th { font-size: 13px; color: var(--muted); }
+td { font-size: 14px; }
+.person { display: flex; align-items: center; gap: 10px; }
+.avatar {
+    width: 46px; height: 46px; border-radius: 50%; object-fit: cover;
+    background: var(--pink); display: inline-flex; align-items: center;
+    justify-content: center; overflow: hidden; flex-shrink: 0;
+}
+.avatar img { width: 100%; height: 100%; object-fit: cover; }
+.small-form { display: inline; }
+.small-form button { padding: 7px 10px; font-size: 12px; }
+.hint { font-size: 12px; color: var(--muted); line-height: 1.5; }
+.empty { padding: 22px; text-align: center; color: var(--muted); }
+.product-thumb { width:54px; height:54px; object-fit:cover; border-radius:7px; background:var(--pink); }
+.recipe-card { background:var(--cream); border:1px solid #eee3e2; border-radius:7px; padding:18px; margin:14px 0; }
+.recipe-card h3 { margin:0 0 7px; font-weight:normal; font-size:19px; }
+.recipe-meta { color:var(--muted); font-size:13px; line-height:1.5; }
+.inline-form { display:inline; }
+.unit-list { margin:12px 0; padding-left:20px; }
+.unit-list li { padding:5px 0; }
 
-@media(max-width: 700px) {
-    body {
-        border-width: 3px;
-        outline-offset: -8px;
-    }
-
-    .container {
-        width: 92%;
-        margin: 25px auto;
-    }
-
-    .secao {
-        padding: 20px 16px;
-        overflow-x: auto;
-    }
-
-    .cards {
-        gap: 12px;
-    }
-
-    .card {
-        min-width: 145px;
-        padding: 18px;
-    }
-
-    table {
-        min-width: 480px;
-        font-size: 13px;
-    }
-
-    th, td {
-        padding: 9px;
-    }
+@media (max-width: 820px) {
+    .layout { grid-template-columns: 1fr; }
+    header { padding: 18px 5%; }
+    h1 { font-size: 30px; }
 }
 </style>
-
 </head>
-
 <body>
-
 <header>
-
-    <h1>Painel do Gestor</h1>
-
-    <p>Gerenciamento do sistema</p>
-
+    <a class="brand" href="#">
+        Doceria Mundo
+        <small>ENCANTADO</small>
+    </a>
+    <span>Painel administrativo</span>
 </header>
 
-<div class="container">
+<main>
+    <span class="eyebrow">ÁREA ADMINISTRATIVA</span>
+    <h1>Painel do gestor</h1>
+    <p class="intro">Gerencie os funcionários e os ingredientes cadastrados na doceria.</p>
 
-    <?php if (!empty($_SESSION['mensagem_gestor'])): ?>
-
-        <div class="mensagem <?= $_SESSION['tipo_gestor'] === 'erro' ? 'erro' : '' ?>">
-
-            <?= proteger($_SESSION['mensagem_gestor']) ?>
-
-        </div>
-
-        <?php
-        unset($_SESSION['mensagem_gestor']);
-        unset($_SESSION['tipo_gestor']);
-        ?>
-
+    <?php if ($dbError): ?>
+        <div class="notice error"><?= h($dbError) ?></div>
     <?php endif; ?>
 
+    <?php if ($flash): ?>
+        <div class="notice <?= h($flash['type'] === 'error' ? 'error' : '') ?>"><?= h($flash['message']) ?></div>
+    <?php endif; ?>
 
-    <div class="cards">
+    <?php if ($pdo): ?>
+    <nav class="tabs" aria-label="Seções do painel">
+        <button class="tab active" type="button" data-tab="funcionarios">Funcionários</button>
+        <button class="tab" type="button" data-tab="produtos">Produtos</button>
+        <button class="tab" type="button" data-tab="receitas">Receitas e unidades</button>
+        <button class="tab" type="button" data-tab="ingredientes">Ingredientes (controle antigo)</button>
+    </nav>
 
-        <div class="card">
+    <section class="panel active" id="funcionarios">
+        <div class="layout">
+            <div class="card">
+                <h2 id="employee-title">Adicionar funcionário ou gestor</h2>
+                <form method="post" enctype="multipart/form-data">
+                    <input type="hidden" name="csrf" value="<?= h(csrfToken()) ?>">
+                    <input type="hidden" name="action" value="save_employee">
+                    <input type="hidden" name="id" id="employee-id" value="0">
 
-            <h3>Total de produtos</h3>
+                    <label for="nome">Nome *</label>
+                    <input id="nome" name="nome" maxlength="100" required>
 
-            <p><?= $totalProdutos ?></p>
+                    <label for="cpf-func">CPF *</label>
+                    <input id="cpf-func" name="cpf" maxlength="14" required placeholder="000.000.000-00">
 
+                    <label for="email-func">E-mail *</label>
+                    <input id="email-func" name="email" type="email" maxlength="40" required>
+
+                    <label for="senha-func">Senha <span id="senha-obrigatoria">*</span></label>
+                    <input id="senha-func" name="senha" type="password" minlength="6" autocomplete="new-password" placeholder="Mínimo de 6 caracteres">
+                    <p class="hint" id="senha-ajuda">Obrigatória para novos cadastros. Ao editar, deixe vazia para manter a senha atual.</p>
+
+                    <label for="perfil-func">Tipo de acesso *</label>
+                    <select id="perfil-func" name="perfil" required>
+                        <option value="funcionarios">Funcionário</option>
+                        <option value="gestor">Gestor</option>
+                    </select>
+                    <p class="hint">Você pode cadastrar outros gestores, que também terão acesso ao painel administrativo.</p>
+
+                    <label for="foto">Foto do funcionário</label>
+                    <input id="foto" name="foto" type="file" accept="image/jpeg,image/png,image/webp">
+                    <p class="hint">Formatos aceitos: JPG, PNG e WEBP. Tamanho máximo: 3 MB. Ao editar, deixe vazio para manter a foto atual.</p>
+
+                    <div class="actions">
+                        <button type="submit">Salvar funcionário</button>
+                        <button class="secondary" type="button" onclick="resetEmployeeForm()">Limpar</button>
+                    </div>
+                </form>
+            </div>
+
+            <div class="card">
+                <h2>Usuários cadastrados (<?= count($employees) ?>)</h2>
+                <?php if (!$employees): ?>
+                    <div class="empty">Nenhum funcionário cadastrado ainda.</div>
+                <?php else: ?>
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr><th>Cadastro</th><th>CPF e perfil</th><th>Ações</th></tr></thead>
+                        <tbody>
+                        <?php foreach ($employees as $employee): ?>
+                            <tr>
+                                <td>
+                                    <div class="person">
+                                        <span class="avatar">
+                                            <?php if ($employee['Foto']): ?>
+                                                <img src="<?= h(UPLOAD_URL . rawurlencode($employee['Foto'])) ?>" alt="Foto de <?= h($employee['Nome']) ?>">
+                                            <?php else: ?>♡<?php endif; ?>
+                                        </span>
+                                        <span><strong><?= h($employee['Nome']) ?></strong><br><span class="hint"><?= h($employee['Email']) ?></span></span>
+                                    </div>
+                                </td>
+                                <td><?= h($employee['CPF']) ?><br><span class="hint"><?= h($employee['perfil'] === 'gestor' ? 'Gestor' : 'Funcionário') ?></span></td>
+                                <td>
+                                    <div class="actions">
+                                        <button type="button" class="secondary"
+                                            onclick='editEmployee(<?= json_encode([
+                                                'id' => $employee['id_funcionarios'],
+                                                'nome' => $employee['Nome'],
+                                                'cpf' => $employee['CPF'],
+                                                'email' => $employee['Email'],
+                                                'perfil' => $employee['perfil']
+                                            ], JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT) ?>)'>Editar</button>
+                                        <form class="small-form" method="post" onsubmit="return confirm('Tem certeza de que deseja excluir este funcionário?');">
+                                            <input type="hidden" name="csrf" value="<?= h(csrfToken()) ?>">
+                                            <input type="hidden" name="action" value="delete_employee">
+                                            <input type="hidden" name="id" value="<?= (int)$employee['id_funcionarios'] ?>">
+                                            <button class="danger" type="submit">Excluir</button>
+                                        </form>
+                                    </div>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+                <?php endif; ?>
+            </div>
         </div>
-
-
-        <div class="card">
-
-            <h3>Total de ingredientes</h3>
-
-            <p><?= $totalIngredientes ?></p>
-
-        </div>
-
-        <div class="card">
-
-            <h3>Total de funcionários</h3>
-
-            <p><?= $totalFuncionarios ?></p>
-
-        </div>
-
-    </div>
-
-    <div class="secao">
-
-        <h2>Cadastrar produto</h2>
-
-        <form method="POST" enctype="multipart/form-data">
-
-            <input type="hidden" name="token"
-                   value="<?= proteger($token) ?>">
-
-            <input type="hidden" name="acao"
-                   value="cadastrar_produto">
-
-            <input type="text"
-                   name="nome"
-                   placeholder="Nome do produto"
-                   required>
-
-            <input type="number"
-                   name="preco"
-                   placeholder="Preço"
-                   min="0"
-                   step="0.01"
-                   required>
-
-            <label for="imagem_produto">Imagem do produto (JPG, PNG ou WEBP, até 5 MB):</label>
-            <input type="file"
-                   id="imagem_produto"
-                   name="imagem"
-                   accept="image/jpeg,image/png,image/webp">
-
-            <button type="submit">
-                Cadastrar produto
-            </button>
-
-        </form>
-
-
-        <h2 style="margin-top:30px;">
-            Produtos cadastrados
-        </h2>
-
-        <table>
-
-            <tr>
-                <th>ID</th>
-                <th>Imagem</th>
-                <th>Produto</th>
-                <th>Preço</th>
-                <th>Ação</th>
-            </tr>
-
-            <?php foreach ($produtos as $produto): ?>
-
-                <tr>
-
-                    <td><?= proteger($produto['id']) ?></td>
-
-                    <td>
-                        <?php if (!empty($produto['imagem_url'])): ?>
-                            <img src="<?= proteger($produto['imagem_url']) ?>"
-                                 alt="Imagem de <?= proteger($produto['nome']) ?>"
-                                 style="width:70px;height:70px;object-fit:cover;border-radius:4px;">
-                        <?php else: ?>
-                            Sem imagem
-                        <?php endif; ?>
-                    </td>
-
-                    <td><?= proteger($produto['nome']) ?></td>
-
-                    <td>
-                        R$ <?= number_format(
-                            (float)$produto['preco'],
-                            2,
-                            ',',
-                            '.'
-                        ) ?>
-                    </td>
-
-                    <td>
-
-                        <form method="POST"
-                              onsubmit="return confirm('Deseja excluir este produto?')">
-
-                            <input type="hidden" name="token"
-                                   value="<?= proteger($token) ?>">
-
-                            <input type="hidden" name="acao"
-                                   value="excluir_produto">
-
-                            <input type="hidden" name="id"
-                                   value="<?= proteger($produto['id']) ?>">
-
-                            <button class="excluir" type="submit">
-                                Excluir
-                            </button>
-
-                        </form>
-
-                    </td>
-
-                </tr>
-
-            <?php endforeach; ?>
-
-        </table>
-
-    </div>
-
-    <div class="secao">
-
-        <h2>Cadastrar ingrediente</h2>
-
-        <form method="POST">
-
-            <input type="hidden" name="token"
-                   value="<?= proteger($token) ?>">
-
-            <input type="hidden" name="acao"
-                   value="cadastrar_ingrediente">
-
-            <input type="text"
-                   name="nome"
-                   placeholder="Nome do ingrediente"
-                   required>
-
-            <label>Data de validade:</label>
-            <input type="date" name="data_validade" required>
-
-            <button type="submit">
-                Cadastrar ingrediente
-            </button>
-
-        </form>
-
-
-        <h2 style="margin-top:30px;">
-            Ingredientes cadastrados
-        </h2>
-
-        <table>
-
-            <tr>
-                <th>ID</th>
-                <th>Ingrediente</th>
-                <th>Data de validade</th>
-                <th>Ação</th>
-            </tr>
-
-            <?php foreach ($ingredientes as $ingrediente): ?>
-
-                <tr>
-
-                    <td><?= proteger($ingrediente['id']) ?></td>
-
-                    <td><?= proteger($ingrediente['nome']) ?></td>
-                    <td><?= date('d/m/Y', strtotime($ingrediente['data_validade'])) ?></td>
-
-                    <td>
-
-                        <form method="POST"
-                              onsubmit="return confirm('Deseja excluir este ingrediente?')">
-
-                            <input type="hidden" name="token"
-                                   value="<?= proteger($token) ?>">
-
-                            <input type="hidden" name="acao"
-                                   value="excluir_ingrediente">
-
-                            <input type="hidden" name="id"
-                                   value="<?= proteger($ingrediente['id']) ?>">
-
-                            <button class="excluir" type="submit">
-                                Excluir
-                            </button>
-
-                        </form>
-
-                    </td>
-
-                </tr>
-
-            <?php endforeach; ?>
-
-        </table>
-
-    </div>
-
-    <div class="secao">
-        <h2>Cadastrar unidade de receita</h2>
-        <form method="POST">
-            <input type="hidden" name="token" value="<?= proteger($token) ?>">
-            <input type="hidden" name="acao" value="cadastrar_unidade">
-
-            <input type="number" name="id_receita" placeholder="ID da receita" min="1" required>
-
-            <select name="id_ingredientes" required>
-                <option value="">Selecione o ingrediente</option>
-                <?php foreach ($ingredientes as $ingrediente): ?>
-                    <option value="<?= proteger($ingrediente['id_ingredientes']) ?>">
-                        <?= proteger($ingrediente['nome']) ?>
-                    </option>
+    </section>
+
+    <section class="panel" id="produtos">
+        <div class="layout">
+            <div class="card">
+                <h2 id="product-title">Cadastrar produto</h2>
+                <form method="post" enctype="multipart/form-data" id="product-form">
+                    <input type="hidden" name="csrf" value="<?= h(csrfToken()) ?>">
+                    <input type="hidden" name="action" value="save_product">
+                    <input type="hidden" name="id" id="product-id" value="0">
+                    <label for="nome-produto">Nome do produto *</label>
+                    <input id="nome-produto" name="nome_produto" maxlength="120" required placeholder="Ex.: Bolo de chocolate">
+                    <label for="preco-produto">Preço (R$) *</label>
+                    <input id="preco-produto" name="preco_produto" type="number" min="0" step="0.01" required placeholder="Ex.: 35,00">
+                    <label for="imagem-produto">Imagem do produto</label>
+                    <input id="imagem-produto" name="imagem_produto" type="file" accept="image/jpeg,image/png,image/webp">
+                    <p class="hint">JPG, PNG ou WEBP, até 5 MB. Ao editar, deixe vazio para manter a imagem atual.</p>
+                    <div class="actions">
+                        <button type="submit">Salvar produto</button>
+                        <button class="secondary" type="button" onclick="resetProductForm()">Limpar</button>
+                    </div>
+                </form>
+            </div>
+            <div class="card">
+                <h2>Produtos cadastrados (<?= count($products) ?>)</h2>
+                <?php if (!$products): ?><div class="empty">Nenhum produto cadastrado.</div><?php else: ?>
+                <div class="table-wrap"><table><thead><tr><th>Produto</th><th>Preço</th><th>Ações</th></tr></thead><tbody>
+                <?php foreach ($products as $product): ?>
+                    <tr>
+                        <td><div class="person">
+                            <?php if (!empty($product['imagem_url'])): ?><img class="product-thumb" src="<?= h($product['imagem_url']) ?>" alt="<?= h($product['nome']) ?>"><?php else: ?><span class="avatar">♡</span><?php endif; ?>
+                            <strong><?= h($product['nome']) ?></strong>
+                        </div></td>
+                        <td>R$ <?= number_format((float)$product['preco'], 2, ',', '.') ?></td>
+                        <td><div class="actions">
+                            <button type="button" class="secondary" onclick='editProduct(<?= json_encode(['id'=>$product['id_produto'],'nome'=>$product['nome'],'preco'=>$product['preco']], JSON_HEX_TAG|JSON_HEX_APOS|JSON_HEX_AMP|JSON_HEX_QUOT) ?>)'>Editar</button>
+                            <form class="small-form" method="post" onsubmit="return confirm('Excluir este produto? As receitas vinculadas precisam ser excluídas primeiro.');">
+                                <input type="hidden" name="csrf" value="<?= h(csrfToken()) ?>"><input type="hidden" name="action" value="delete_product"><input type="hidden" name="id" value="<?= (int)$product['id_produto'] ?>"><button class="danger" type="submit">Excluir</button>
+                            </form>
+                        </div></td>
+                    </tr>
                 <?php endforeach; ?>
-            </select>
+                </tbody></table></div><?php endif; ?>
+                <p class="hint">Os produtos desta lista são os mesmos utilizados automaticamente pelo Cardapio_iFood.php.</p>
+            </div>
+        </div>
+    </section>
 
-            <input type="number" name="quantidade" placeholder="Quantidade" min="0.01" step="0.01" required>
-            <input type="text" name="sigla_quantidade" placeholder="Unidade (g, kg, ml...)" maxlength="4" required>
+    <section class="panel" id="receitas">
+        <div class="layout">
+            <div class="card">
+                <h2 id="recipe-title">Cadastrar receita</h2>
+                <form method="post" id="recipe-form">
+                    <input type="hidden" name="csrf" value="<?= h(csrfToken()) ?>"><input type="hidden" name="action" value="save_recipe"><input type="hidden" name="id" id="recipe-id" value="0">
+                    <label for="recipe-product">Produto relacionado *</label>
+                    <select name="id_produto" id="recipe-product" required><option value="">Selecione o produto</option>
+                        <?php foreach ($products as $product): ?><option value="<?= (int)$product['id_produto'] ?>"><?= h($product['nome']) ?></option><?php endforeach; ?>
+                    </select>
+                    <label for="recipe-name">Nome da receita *</label><input id="recipe-name" name="nome_receita" maxlength="100" required>
+                    <label for="recipe-description">Descrição</label><input id="recipe-description" name="descricao_receita" maxlength="200">
+                    <label for="recipe-method">Modo de preparo</label><textarea id="recipe-method" name="modo_preparo" maxlength="250" rows="3" style="width:100%;padding:11px 12px;border:1px solid #d9c8c8;border-radius:4px;font:15px Georgia,serif"></textarea>
+                    <div class="actions"><button type="submit">Salvar receita</button><button class="secondary" type="button" onclick="resetRecipeForm()">Limpar</button></div>
+                </form>
+            </div>
+            <div class="card">
+                <h2>Receitas e ingredientes</h2>
+                <?php if (!$recipes): ?><div class="empty">Nenhuma receita cadastrada.</div><?php else: ?>
+                    <?php foreach ($recipes as $recipe): ?>
+                        <article class="recipe-card">
+                            <h3><?= h($recipe['nome_receita']) ?></h3>
+                            <div class="recipe-meta"><strong>Produto:</strong> <?= h($recipe['produto_nome']) ?><br><?= h($recipe['descricao'] ?? '') ?><br><?= h($recipe['modo_preparo'] ?? '') ?></div>
+                            <div class="actions">
+                                <button type="button" class="secondary" onclick='editRecipe(<?= json_encode(['id'=>$recipe['id_receita'],'id_produto'=>$recipe['id_produto'],'nome'=>$recipe['nome_receita'],'descricao'=>$recipe['descricao'],'modo'=>$recipe['modo_preparo']], JSON_HEX_TAG|JSON_HEX_APOS|JSON_HEX_AMP|JSON_HEX_QUOT) ?>)'>Editar receita</button>
+                                <form class="small-form" method="post" onsubmit="return confirm('Excluir esta receita e todos os ingredientes/unidades vinculados?');"><input type="hidden" name="csrf" value="<?= h(csrfToken()) ?>"><input type="hidden" name="action" value="delete_recipe"><input type="hidden" name="id" value="<?= (int)$recipe['id_receita'] ?>"><button class="danger" type="submit">Excluir receita</button></form>
+                            </div>
+                            <strong>Ingredientes da receita</strong>
+                            <ul class="unit-list">
+                            <?php $foundUnit = false; foreach ($recipeUnits as $unit): if ((int)$unit['id_receita'] !== (int)$recipe['id_receita']) continue; $foundUnit = true; ?>
+                                <li><?= h($unit['ingrediente_nome']) ?> — <?= h(rtrim(rtrim(number_format((float)$unit['quantidade'], 2, ',', '.'), '0'), ',')) ?> <?= h($unit['sigla_quantidade']) ?>
+                                    <div class="actions">
+                                        <button type="button" class="secondary" onclick='editUnit(<?= json_encode(['id'=>$unit['id_unidades'],'id_receita'=>$unit['id_receita'],'id_ingredientes'=>$unit['id_ingredientes'],'quantidade'=>$unit['quantidade'],'sigla'=>$unit['sigla_quantidade']], JSON_HEX_TAG|JSON_HEX_APOS|JSON_HEX_AMP|JSON_HEX_QUOT) ?>)'>Editar</button>
+                                        <form class="small-form" method="post" onsubmit="return confirm('Remover este ingrediente da receita?');"><input type="hidden" name="csrf" value="<?= h(csrfToken()) ?>"><input type="hidden" name="action" value="delete_unit"><input type="hidden" name="id" value="<?= (int)$unit['id_unidades'] ?>"><button class="danger" type="submit">Excluir</button></form>
+                                    </div>
+                                </li>
+                            <?php endforeach; if (!$foundUnit): ?><li class="hint">Nenhum ingrediente adicionado.</li><?php endif; ?>
+                            </ul>
+                            <button type="button" onclick="newUnitForRecipe(<?= (int)$recipe['id_receita'] ?>)">Adicionar ingrediente a esta receita</button>
+                        </article>
+                    <?php endforeach; ?>
+                <?php endif; ?>
+            </div>
+        </div>
+        <div class="card" style="margin-top:22px;">
+            <h2 id="unit-title">Adicionar ingrediente à receita</h2>
+            <form method="post" id="unit-form">
+                <input type="hidden" name="csrf" value="<?= h(csrfToken()) ?>"><input type="hidden" name="action" value="save_unit"><input type="hidden" name="id" id="unit-id" value="0">
+                <div class="layout">
+                    <div><label for="unit-recipe">Receita *</label><select id="unit-recipe" name="id_receita" required><option value="">Selecione a receita</option><?php foreach ($recipes as $recipe): ?><option value="<?= (int)$recipe['id_receita'] ?>"><?= h($recipe['produto_nome'] . ' — ' . $recipe['nome_receita']) ?></option><?php endforeach; ?></select></div>
+                    <div><label for="unit-ingredient">Ingrediente *</label><select id="unit-ingredient" name="id_ingredientes" required><option value="">Selecione o ingrediente</option><?php foreach ($realIngredients as $ingredient): ?><option value="<?= (int)$ingredient['id_ingredientes'] ?>"><?= h($ingredient['nome']) ?></option><?php endforeach; ?></select></div>
+                </div>
+                <div class="layout">
+                    <div><label for="unit-quantity">Quantidade *</label><input id="unit-quantity" name="quantidade_unidade" type="number" min="0.01" step="0.01" required></div>
+                    <div>
+                        <label for="unit-sigla">Unidade de medida *</label>
+                        <select id="unit-sigla" name="sigla_quantidade" required>
+                            <option value="">Selecione a unidade</option>
+                            <option value="g">Grama (g)</option>
+                            <option value="kg">Quilograma (kg)</option>
+                            <option value="mg">Miligrama (mg)</option>
+                            <option value="ml">Mililitro (ml)</option>
+                            <option value="L">Litro (L)</option>
+                            <option value="un">Unidade (un)</option>
+                            <option value="pacote">Pacote</option>
+                            <option value="caixa">Caixa</option>
+                            <option value="colher_sopa">Colher de sopa</option>
+                            <option value="colher_cha">Colher de chá</option>
+                            <option value="xicara">Xícara</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="actions"><button type="submit">Salvar ingrediente da receita</button><button type="button" class="secondary" onclick="resetUnitForm()">Limpar</button></div>
+                <?php if (!$realIngredients): ?><p class="hint">Cadastre primeiro os ingredientes na tabela ingredientes para adicioná-los às receitas.</p><?php endif; ?>
+            </form>
+        </div>
+    </section>
 
-            <button type="submit">Cadastrar unidade</button>
-        </form>
+    <section class="panel" id="ingredientes">
+        <div class="layout">
+            <div class="card">
+                <h2 id="ingredient-title">Adicionar ingrediente</h2>
+                <form method="post">
+                    <input type="hidden" name="csrf" value="<?= h(csrfToken()) ?>">
+                    <input type="hidden" name="action" value="save_ingredient">
+                    <input type="hidden" name="id" id="ingredient-id" value="0">
 
-        <h2 style="margin-top:30px;">Unidades cadastradas</h2>
-        <table>
-            <tr>
-                <th>ID</th>
-                <th>ID da receita</th>
-                <th>Ingrediente</th>
-                <th>Quantidade</th>
-                <th>Ação</th>
-            </tr>
-            <?php foreach ($unidades as $unidade): ?>
-                <tr>
-                    <td><?= proteger($unidade['id_unidades']) ?></td>
-                    <td><?= proteger($unidade['id_receita']) ?></td>
-                    <td><?= proteger($unidade['ingrediente']) ?></td>
-                    <td><?= proteger($unidade['quantidade']) ?> <?= proteger($unidade['sigla_quantidade']) ?></td>
-                    <td>
-                        <form method="POST" onsubmit="return confirm('Deseja excluir esta unidade?')">
-                            <input type="hidden" name="token" value="<?= proteger($token) ?>">
-                            <input type="hidden" name="acao" value="excluir_unidade">
-                            <input type="hidden" name="id" value="<?= proteger($unidade['id_unidades']) ?>">
-                            <button class="excluir" type="submit">Excluir</button>
-                        </form>
-                    </td>
-                </tr>
-            <?php endforeach; ?>
-        </table>
-    </div>
+                    <label for="nome-ingrediente">Nome do ingrediente *</label>
+                    <input id="nome-ingrediente" name="nome_ingrediente" maxlength="120" required placeholder="Ex.: Farinha de trigo">
 
-    <div class="secao">
+                    <label for="quantidade">Quantidade em estoque *</label>
+                    <input id="quantidade" name="quantidade" type="number" min="0" step="0.001" required placeholder="Ex.: 5">
 
-        <h2>Cadastrar funcionário</h2>
+                    <label for="unidade">Unidade de medida *</label>
+                    <select id="unidade" name="unidade" required>
+                        <option value="">Selecione</option>
+                        <option value="kg">Quilograma (kg)</option>
+                        <option value="g">Grama (g)</option>
+                        <option value="L">Litro (L)</option>
+                        <option value="ml">Mililitro (ml)</option>
+                        <option value="unidade">Unidade</option>
+                        <option value="pacote">Pacote</option>
+                        <option value="caixa">Caixa</option>
+                    </select>
 
-        <form method="POST">
+                    <div class="actions">
+                        <button type="submit">Salvar ingrediente</button>
+                        <button class="secondary" type="button" onclick="resetIngredientForm()">Limpar</button>
+                    </div>
+                </form>
+            </div>
 
-            <input type="hidden" name="token" value="<?= proteger($token) ?>">
-            <input type="hidden" name="acao" value="cadastrar_funcionario">
+            <div class="card">
+                <h2>Ingredientes cadastrados (<?= count($ingredients) ?>)</h2>
+                <?php if (!$ingredients): ?>
+                    <div class="empty">Nenhum ingrediente cadastrado ainda.</div>
+                <?php else: ?>
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr><th>Ingrediente</th><th>Estoque</th><th>Ações</th></tr></thead>
+                        <tbody>
+                        <?php foreach ($ingredients as $ingredient): ?>
+                            <tr>
+                                <td><strong><?= h($ingredient['nome']) ?></strong></td>
+                                <td><?= h(rtrim(rtrim(number_format((float)$ingredient['quantidade'], 3, ',', '.'), '0'), ',')) ?> <?= h($ingredient['unidade']) ?></td>
+                                <td>
+                                    <div class="actions">
+                                        <button type="button" class="secondary"
+                                            onclick='editIngredient(<?= json_encode([
+                                                'id' => $ingredient['id'],
+                                                'nome' => $ingredient['nome'],
+                                                'quantidade' => $ingredient['quantidade'],
+                                                'unidade' => $ingredient['unidade']
+                                            ], JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT) ?>)'>Editar</button>
+                                        <form class="small-form" method="post" onsubmit="return confirm('Excluir este ingrediente? Verifique antes se ele é usado em alguma receita.');">
+                                            <input type="hidden" name="csrf" value="<?= h(csrfToken()) ?>">
+                                            <input type="hidden" name="action" value="delete_ingredient">
+                                            <input type="hidden" name="id" value="<?= (int)$ingredient['id'] ?>">
+                                            <button class="danger" type="submit">Excluir</button>
+                                        </form>
+                                    </div>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+                <?php endif; ?>
+            </div>
+        </div>
+        
+    </section>
+    <?php endif; ?>
+</main>
 
-            <input type="text" name="nome_funcionario" placeholder="Nome completo" required>
-            <input type="email" name="email_funcionario" placeholder="E-mail" required>
-            <input type="text" name="cpf_funcionario" placeholder="CPF" maxlength="14" required>
-            <input type="password" name="senha_funcionario" placeholder="Senha (mínimo 6 caracteres)" minlength="6" required>
+<script>
+document.querySelectorAll('.tab').forEach(function(tab) {
+    tab.addEventListener('click', function() {
+        document.querySelectorAll('.tab').forEach(function(item) { item.classList.remove('active'); });
+        document.querySelectorAll('.panel').forEach(function(panel) { panel.classList.remove('active'); });
+        tab.classList.add('active');
+        document.getElementById(tab.dataset.tab).classList.add('active');
+    });
+});
 
-            <button type="submit">Cadastrar funcionário</button>
+function editEmployee(data) {
+    document.querySelector('[data-tab="funcionarios"]').click();
+    document.getElementById('employee-title').textContent = 'Editar funcionário';
+    document.getElementById('employee-id').value = data.id;
+    document.getElementById('nome').value = data.nome || '';
+    document.getElementById('cpf-func').value = data.cpf || '';
+    document.getElementById('email-func').value = data.email || '';
+    document.getElementById('perfil-func').value = data.perfil || 'funcionarios';
+    document.getElementById('senha-func').value = '';
+    document.getElementById('senha-func').required = false;
+    document.getElementById('senha-obrigatoria').textContent = '';
+    document.getElementById('senha-ajuda').textContent = 'Deixe vazia para manter a senha atual.';
+    document.getElementById('foto').value = '';
+    window.scrollTo({top: 0, behavior: 'smooth'});
+}
+function resetEmployeeForm() {
+    document.querySelector('#funcionarios form').reset();
+    document.getElementById('employee-id').value = '0';
+    document.getElementById('employee-title').textContent = 'Adicionar funcionário ou gestor';
+    document.getElementById('senha-func').required = true;
+    document.getElementById('senha-obrigatoria').textContent = '*';
+    document.getElementById('senha-ajuda').textContent = 'Obrigatória para novos cadastros. Ao editar, deixe vazia para manter a senha atual.';
+}
+function editIngredient(data) {
+    document.querySelector('[data-tab="ingredientes"]').click();
+    document.getElementById('ingredient-title').textContent = 'Editar ingrediente';
+    document.getElementById('ingredient-id').value = data.id;
+    document.getElementById('nome-ingrediente').value = data.nome || '';
+    document.getElementById('quantidade').value = data.quantidade;
+    document.getElementById('unidade').value = data.unidade || '';
+    window.scrollTo({top: 0, behavior: 'smooth'});
+}
+function resetIngredientForm() {
+    document.querySelector('#ingredientes form').reset();
+    document.getElementById('ingredient-id').value = '0';
+    document.getElementById('ingredient-title').textContent = 'Adicionar ingrediente';
+}
 
-        </form>
-
-        <h2 style="margin-top:30px;">Funcionários cadastrados</h2>
-
-        <table>
-            <tr>
-                <th>ID</th>
-                <th>Nome</th>
-                <th>E-mail</th>
-                <th>Perfil</th>
-            </tr>
-
-            <?php foreach ($funcionarios as $funcionario): ?>
-                <tr>
-                    <td><?= proteger($funcionario['id_funcionarios']) ?></td>
-                    <td><?= proteger($funcionario['Nome']) ?></td>
-                    <td><?= proteger($funcionario['Email']) ?></td>
-                    <td><?= proteger($funcionario['perfil']) ?></td>
-                </tr>
-            <?php endforeach; ?>
-        </table>
-
-    </div>
-
-</div>
-
+function resetProductForm() {
+    document.getElementById('product-form').reset();
+    document.getElementById('product-id').value = '0';
+    document.getElementById('product-title').textContent = 'Cadastrar produto';
+}
+function editProduct(data) {
+    document.querySelector('[data-tab="produtos"]').click();
+    document.getElementById('product-title').textContent = 'Editar produto';
+    document.getElementById('product-id').value = data.id;
+    document.getElementById('nome-produto').value = data.nome || '';
+    document.getElementById('preco-produto').value = data.preco || '';
+    document.getElementById('imagem-produto').value = '';
+    window.scrollTo({top:0,behavior:'smooth'});
+}
+function resetRecipeForm() {
+    document.getElementById('recipe-form').reset();
+    document.getElementById('recipe-id').value = '0';
+    document.getElementById('recipe-title').textContent = 'Cadastrar receita';
+}
+function editRecipe(data) {
+    document.querySelector('[data-tab="receitas"]').click();
+    document.getElementById('recipe-title').textContent = 'Editar receita';
+    document.getElementById('recipe-id').value = data.id;
+    document.getElementById('recipe-product').value = data.id_produto;
+    document.getElementById('recipe-name').value = data.nome || '';
+    document.getElementById('recipe-description').value = data.descricao || '';
+    document.getElementById('recipe-method').value = data.modo || '';
+    window.scrollTo({top:0,behavior:'smooth'});
+}
+function resetUnitForm() {
+    document.getElementById('unit-form').reset();
+    document.getElementById('unit-id').value = '0';
+    document.getElementById('unit-title').textContent = 'Adicionar ingrediente à receita';
+}
+function newUnitForRecipe(id) {
+    document.querySelector('[data-tab="receitas"]').click();
+    resetUnitForm();
+    document.getElementById('unit-recipe').value = String(id);
+    document.getElementById('unit-ingredient').focus();
+    document.getElementById('unit-form').scrollIntoView({behavior:'smooth',block:'center'});
+}
+function editUnit(data) {
+    document.querySelector('[data-tab="receitas"]').click();
+    document.getElementById('unit-title').textContent = 'Editar ingrediente da receita';
+    document.getElementById('unit-id').value = data.id;
+    document.getElementById('unit-recipe').value = data.id_receita;
+    document.getElementById('unit-ingredient').value = data.id_ingredientes;
+    document.getElementById('unit-quantity').value = data.quantidade;
+    document.getElementById('unit-sigla').value = data.sigla || '';
+    document.getElementById('unit-form').scrollIntoView({behavior:'smooth',block:'center'});
+}
+</script>
 </body>
 </html>

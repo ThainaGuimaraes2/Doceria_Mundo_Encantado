@@ -10,6 +10,19 @@ function h($valor) {
 $stmt = $pdo->query("SELECT id_produto, nome, preco, imagem_url FROM produto ORDER BY nome ASC");
 $produtos = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
+// Busca as descrições das receitas vinculadas a cada produto.
+$stmtReceitas = $pdo->query(
+    "SELECT id_produto, nome_receita, descricao
+     FROM receita
+     WHERE descricao IS NOT NULL AND TRIM(descricao) <> ''
+     ORDER BY nome_receita ASC"
+);
+$receitasPorProduto = [];
+foreach ($stmtReceitas->fetchAll(PDO::FETCH_ASSOC) as $receita) {
+    $idProdutoReceita = (int)$receita['id_produto'];
+    $receitasPorProduto[$idProdutoReceita][] = $receita;
+}
+
 $erro = '';
 $pedidoCriado = false;
 
@@ -33,19 +46,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['finalizar_pedido'])) 
         $idProduto = filter_input(INPUT_POST, 'id_produto', FILTER_VALIDATE_INT);
         $quantidade = filter_input(INPUT_POST, 'quantidade', FILTER_VALIDATE_INT);
         $forma = (string)($_POST['forma_pagamento'] ?? '');
-        $parcelas = filter_input(INPUT_POST, 'parcelas', FILTER_VALIDATE_INT);
 
+        // Opções compatíveis com o fluxo atual: o site registra o pedido,
+        // mas não processa cobranças nem armazena dados de cartão.
         $formas = [
-            '1' => 'Pix / Dinheiro',
-            '2' => 'Débito',
-            '3' => 'Crédito',
-            '4' => 'Link de pagamento'
+            'pix' => 'Pix (após confirmação do pedido)',
+            'dinheiro_retirada' => 'Dinheiro na retirada',
+            'debito_retirada' => 'Cartão de débito na retirada',
+            'credito_retirada' => 'Cartão de crédito na retirada'
         ];
 
         if (
             !$idProduto || !$quantidade || $quantidade < 1 || $quantidade > 99 ||
-            !isset($formas[$forma]) ||
-            !$parcelas || $parcelas < 1 || $parcelas > 12
+            !isset($formas[$forma])
         ) {
             $erro = 'Confira o produto, a quantidade e a forma de pagamento.';
         } else {
@@ -61,25 +74,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['finalizar_pedido'])) 
             } else {
                 $valorUnitario = (float)$produto['preco'];
                 $valorTotal = $valorUnitario * $quantidade;
-
-                // Mantém o cálculo de juros da classe já usada no projeto, quando disponível.
-                if ($forma === '3' && file_exists('./classes/Juros.php')) {
-                    require_once './classes/Juros.php';
-                    $juros = new Juros();
-                    ob_start();
-                    $retornoJuros = $juros->calcular($valorUnitario, $parcelas, $quantidade);
-                    $saidaJuros = trim(ob_get_clean());
-
-                    if (is_numeric($retornoJuros)) {
-                        $valorTotal = (float)$retornoJuros;
-                    } elseif ($saidaJuros !== '') {
-                        $texto = strip_tags($saidaJuros);
-                        if (preg_match_all('/(?:R\\$\\s*)?([0-9.]+,[0-9]{2}|[0-9]+\\.[0-9]{2})/', $texto, $achados) && !empty($achados[1])) {
-                            $ultimo = end($achados[1]);
-                            $valorTotal = (float)str_replace(',', '.', str_replace('.', '', $ultimo));
-                        }
-                    }
-                }
 
                 try {
                     $pdo->beginTransaction();
@@ -109,7 +103,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['finalizar_pedido'])) 
                     );
                     $insertPagamento->execute([
                         ':pedido' => $idPedido,
-                        ':forma' => $formas[$forma] . ($forma === '3' ? " - {$parcelas}x" : ''),
+                        ':forma' => $formas[$forma],
                         ':codigo' => $codigoPagamento
                     ]);
 
@@ -151,11 +145,18 @@ h2{font-size:22px;font-weight:normal;color:var(--escuro);margin:25px 0 14px}
 .sem-imagem{display:grid;place-items:center;font-size:13px;color:#98777d}
 .info{flex:1}.info h3{margin:0 0 8px;color:var(--escuro);font-size:19px;font-weight:normal}
 .preco{font-weight:bold;font-size:18px;margin:0}
+.descricoes-receita{margin-top:10px;padding-top:9px;border-top:1px solid var(--borda)}
+.descricao-receita{margin:5px 0 0;font-size:14px;line-height:1.5;color:#896a70}
+.descricao-receita strong{color:var(--escuro)}
 .form,.aviso{max-width:700px;margin:25px auto 0;padding:25px;background:var(--branco);border:1px solid var(--borda);border-radius:12px}
 label{display:block;margin:13px 0 6px;color:var(--escuro)}
 select,input{width:100%;padding:12px;border:1px solid #dfcdd1;border-radius:8px;background:#fff;color:var(--escuro);font:15px Georgia,serif;box-sizing:border-box}
 button{margin-top:18px;padding:12px 22px;border:0;border-radius:8px;background:var(--marrom);color:white;font:bold 15px Georgia,serif;cursor:pointer}
 .aviso{text-align:center}.erro{color:#9b3030}.login-link{color:var(--escuro);font-weight:bold}
+.orientacao-pagamento{line-height:1.5;color:#896a70}
+.aviso-pagamento{margin-top:16px;padding:14px 16px;background:var(--rosa-claro);border:1px solid var(--borda);border-radius:9px;line-height:1.5}
+.aviso-pagamento ul{margin:8px 0;padding-left:22px}
+.aviso-pagamento small{display:block;color:#896a70}
 @media(max-width:560px){.produto{gap:11px}.produto img,.sem-imagem{width:82px;height:82px}.info h3{font-size:16px}.form{padding:19px}}
 </style>
 
@@ -185,50 +186,75 @@ button{margin-top:18px;padding:12px 22px;border:0;border-radius:8px;background:v
                 <div class="info">
                     <h3><?= h($produto['nome']) ?></h3>
                     <p class="preco">R$ <?= number_format((float)$produto['preco'], 2, ',', '.') ?></p>
+
+                    <?php
+                    $idProdutoAtual = (int)$produto['id_produto'];
+                    $receitasDoProduto = $receitasPorProduto[$idProdutoAtual] ?? [];
+                    ?>
+                    <?php if (!empty($receitasDoProduto)): ?>
+                        <div class="descricoes-receita">
+                            <?php foreach ($receitasDoProduto as $receita): ?>
+                                <p class="descricao-receita">
+                                    <?php if (!empty($receita['nome_receita'])): ?>
+                                        <strong><?= h($receita['nome_receita']) ?>:</strong>
+                                    <?php endif; ?>
+                                    <?= nl2br(h($receita['descricao'])) ?>
+                                </p>
+                            <?php endforeach; ?>
+                        </div>
+                    <?php endif; ?>
                 </div>
             </article>
         <?php endforeach; ?>
         </section>
 
-        <form class="form" method="post" action="">
-            <h2 style="margin-top:0">Finalize seu pedido</h2>
-            <?php if (!isset($_SESSION['tipo']) || $_SESSION['tipo'] !== 'cliente'): ?>
-                <p>Para comprar, você precisa entrar na sua conta ou criar um cadastro.</p>
+        <?php if (!isset($_SESSION['tipo'], $_SESSION['id']) || $_SESSION['tipo'] !== 'cliente'): ?>
+            <section class="form">
+                <h2 style="margin-top:0">Finalize seu pedido</h2>
+                <p>Para fazer um pedido, você precisa ter uma conta de cliente e estar conectado.</p>
                 <p><a class="login-link" href="login.php">Entrar / Fazer cadastro</a></p>
-            <?php endif; ?>
+            </section>
+        <?php else: ?>
+            <form class="form" method="post" action="">
+                <h2 style="margin-top:0">Finalize seu pedido</h2>
+                <p class="orientacao-pagamento">Escolha o produto, a quantidade e como deseja pagar. O pedido será registrado como pendente até a confirmação.</p>
 
-            <input type="hidden" name="token" value="<?= h($_SESSION['token_pedido']) ?>">
+                <input type="hidden" name="token" value="<?= h($_SESSION['token_pedido']) ?>">
 
-            <label for="id_produto">Produto:</label>
-            <select name="id_produto" id="id_produto" required>
-                <option value="">Selecione um produto</option>
-                <?php foreach ($produtos as $produto): ?>
-                    <option value="<?= (int)$produto['id_produto'] ?>">
-                        <?= h($produto['nome']) ?> — R$ <?= number_format((float)$produto['preco'], 2, ',', '.') ?>
-                    </option>
-                <?php endforeach; ?>
-            </select>
+                <label for="id_produto">Produto:</label>
+                <select name="id_produto" id="id_produto" required>
+                    <option value="">Selecione um produto</option>
+                    <?php foreach ($produtos as $produto): ?>
+                        <option value="<?= (int)$produto['id_produto'] ?>">
+                            <?= h($produto['nome']) ?> — R$ <?= number_format((float)$produto['preco'], 2, ',', '.') ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
 
-            <label for="quantidade">Quantidade:</label>
-            <input type="number" name="quantidade" id="quantidade" min="1" max="99" value="1" required>
+                <label for="quantidade">Quantidade:</label>
+                <input type="number" name="quantidade" id="quantidade" min="1" max="99" value="1" required>
 
-            <label for="forma_pagamento">Forma de pagamento:</label>
-            <select name="forma_pagamento" id="forma_pagamento" required>
-                <option value="1">Pix / Dinheiro</option>
-                <option value="2">Débito</option>
-                <option value="3">Crédito</option>
-                <option value="4">Link de pagamento</option>
-            </select>
+                <label for="forma_pagamento">Forma de pagamento:</label>
+                <select name="forma_pagamento" id="forma_pagamento" required>
+                    <option value="">Selecione como deseja pagar</option>
+                    <option value="pix">Pix — após confirmação do pedido</option>
+                    <option value="dinheiro_retirada">Dinheiro — na retirada</option>
+                    <option value="debito_retirada">Cartão de débito — na retirada</option>
+                    <option value="credito_retirada">Cartão de crédito — na retirada</option>
+                </select>
 
-            <label for="parcelas">Parcelas (para cartão de crédito):</label>
-            <select name="parcelas" id="parcelas">
-                <?php for ($i=1; $i<=12; $i++): ?>
-                    <option value="<?= $i ?>"><?= $i ?>x</option>
-                <?php endfor; ?>
-            </select>
+                <div class="aviso-pagamento">
+                    <strong>Como funciona o pagamento?</strong>
+                    <ul>
+                        <li><strong>Pix:</strong> os dados para transferência serão informados após a confirmação do pedido pela doceria.</li>
+                        <li><strong>Dinheiro ou cartão:</strong> o pagamento será feito presencialmente no momento da retirada.</li>
+                    </ul>
+                    <small>Este site registra o pedido e a forma de pagamento escolhida. Ele ainda não processa pagamentos online. Não informe número de cartão, senha ou código de segurança neste formulário.</small>
+                </div>
 
-            <button type="submit" name="finalizar_pedido" value="1">Finalizar pedido</button>
-        </form>
+                <button type="submit" name="finalizar_pedido" value="1">Confirmar pedido</button>
+            </form>
+        <?php endif; ?>
     <?php endif; ?>
 </div>
 </main>
